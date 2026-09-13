@@ -220,7 +220,7 @@ extension CostUsageStore {
 
     nonisolated func syncLoadCodexTokenSnapshotsIfAvailable(
         paths: Set<String>,
-        receipt: CodexBaselineReceipt) -> [String: [CostUsageStoreTokenSnapshot]]?
+        receipt: CodexBaselineReceipt) -> [String: [CostUsageCodexTokenSnapshot]]?
     {
         self.syncWithStoreIsolation { store in
             guard let stamp = store.codexBaselineStamp(for: receipt),
@@ -229,7 +229,7 @@ extension CostUsageStore {
             else { return nil }
             do {
                 // Reuse the loaded connection: reopening could rebuild a concurrent replacement.
-                let snapshots = try Self.inReadTransaction(database) {
+                let persisted = try Self.inReadTransaction(database) {
                     var snapshots: [String: [CostUsageStoreTokenSnapshot]] = [:]
                     for path in paths.sorted() {
                         if Self.codexTokenSnapshotReadFailureForTesting?(store.databaseURL, path) == true {
@@ -247,8 +247,12 @@ extension CostUsageStore {
                     }
                     return snapshots
                 }
+                let snapshots = persisted.mapValues { $0.map(Self.tokenSnapshot) }
                 // A read transaction pins data_version; validate again only after COMMIT.
                 guard store.currentDatabaseStamp() == stamp else { return nil }
+                for (path, rows) in snapshots {
+                    store.retainedCodexBaseline?.baseline.hydratedTokenSnapshots[path] = rows
+                }
                 return snapshots
             } catch {
                 store.recoverConnectionAfterFailure()

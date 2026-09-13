@@ -1010,13 +1010,13 @@ struct CostUsageScannerBreakdownTests {
     }
 
     @Test
-    func `codex narrow full rescan preserves cached days outside scan window`() throws {
+    func `codex narrow full rescan replaces pricing rows and preserves outside days`() throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
 
         let olderDay = try env.makeLocalNoon(year: 2026, month: 5, day: 10)
         let day = try env.makeLocalNoon(year: 2026, month: 5, day: 18)
-        let model = "gpt-5.4"
+        let model = "gpt-5.6-sol"
         let fileURL = try env.writeCodexSessionFile(
             day: day,
             filename: "multi-day-session.jsonl",
@@ -1029,7 +1029,11 @@ struct CostUsageScannerBreakdownTests {
                 self.codexTokenCount(
                     timestamp: env.isoString(for: day.addingTimeInterval(1)),
                     model: model,
-                    last: (input: 10, cached: 0, output: 0)),
+                    last: (input: 220_000, cached: 0, output: 0)),
+                self.codexTokenCount(
+                    timestamp: env.isoString(for: day.addingTimeInterval(2)),
+                    model: model,
+                    last: (input: 240_000, cached: 0, output: 0)),
             ]))
 
         var options = CostUsageScanner.Options(
@@ -1045,7 +1049,7 @@ struct CostUsageScannerBreakdownTests {
             until: day,
             now: day,
             options: options)
-        #expect(wide.summary?.totalTokens == 30)
+        #expect(wide.summary?.totalTokens == 460_020)
 
         try env.jsonl([
             self.codexTurnContext(timestamp: env.isoString(for: olderDay), model: model),
@@ -1056,7 +1060,11 @@ struct CostUsageScannerBreakdownTests {
             self.codexTokenCount(
                 timestamp: env.isoString(for: day.addingTimeInterval(1)),
                 model: model,
-                last: (input: 12, cached: 0, output: 0)),
+                last: (input: 220_000, cached: 0, output: 0)),
+            self.codexTokenCount(
+                timestamp: env.isoString(for: day.addingTimeInterval(2)),
+                model: model,
+                last: (input: 180_000, cached: 0, output: 0)),
         ]).write(to: fileURL, atomically: true, encoding: .utf8)
 
         let narrow = CostUsageScanner.loadDailyReport(
@@ -1065,7 +1073,22 @@ struct CostUsageScannerBreakdownTests {
             until: day,
             now: day.addingTimeInterval(1),
             options: options)
-        #expect(narrow.summary?.totalTokens == 12)
+        #expect(narrow.summary?.totalTokens == 400_000)
+        let warmCost = try #require(narrow.summary?.totalCostUSD)
+        let cachedRows = try #require(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+            .files[fileURL.path]?.codexRows)
+        #expect(cachedRows.map(\.input).sorted() == [20, 180_000, 220_000])
+
+        var coldOptions = options
+        coldOptions.cacheRoot = env.root.appendingPathComponent("cold-cache")
+        let cold = CostUsageScanner.loadDailyReport(
+            provider: .codex,
+            since: day,
+            until: day,
+            now: day.addingTimeInterval(1),
+            options: coldOptions)
+        #expect(cold.summary?.totalTokens == narrow.summary?.totalTokens)
+        #expect(try abs(warmCost - #require(cold.summary?.totalCostUSD)) < 0.000_000_001)
 
         options.refreshMinIntervalSeconds = 60
         let repeatedWide = CostUsageScanner.loadDailyReport(
@@ -1074,7 +1097,8 @@ struct CostUsageScannerBreakdownTests {
             until: day,
             now: day.addingTimeInterval(2),
             options: options)
-        #expect(repeatedWide.summary?.totalTokens == 32)
+        #expect(repeatedWide.summary?.totalTokens == 400_020)
+        #expect(try #require(repeatedWide.summary?.totalCostUSD) > warmCost)
     }
 
     @Test

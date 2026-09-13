@@ -6,6 +6,7 @@
 - Codex: add the debug-only Workspaces project/session inspector with source, history and privacy updates, plus cancellation when its window closes (#3291). Thanks @AmrMohamad!
 
 ### Fixed
+- Codex: discard obsolete request-pricing rows during routine rescans of changed sessions, restoring cost estimates that could disappear while token totals remained correct; preserve cached history outside the rescan window (related to #3617).
 - Menu: remove empty space and clipped cards after switching merged-menu tabs with different card heights (#3616, fixes #3549). Thanks @zenibako!
 - Mistral: handle signed billing adjustments without intermediate overflow, reject unrepresentable counts without crashing, and retain valid costs when token totals or model rankings are unavailable.
 - Claude: show dated last-known claude-swap usage beside diagnostics, reported spend, disabled slots, and the active account; keep historical quotas out of the menu icon and ready-account suggestions (#3452). Thanks @QuantIntellect!

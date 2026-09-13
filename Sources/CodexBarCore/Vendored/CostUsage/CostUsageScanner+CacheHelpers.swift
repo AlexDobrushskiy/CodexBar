@@ -348,29 +348,22 @@ extension CostUsageScanner {
 
     static func codexRowsWithPricingMetadata(
         _ rows: [CodexUsageRow],
-        priorityTurns: [String: CodexPriorityTurnMetadata]) -> [CodexUsageRow]
+        priorityTurns: [String: CodexPriorityTurnMetadata],
+        preservingPricingFrom previousRow: (CodexUsageRow) -> CodexUsageRow? = { _ in nil }) -> [CodexUsageRow]
     {
         rows.map { row in
+            var row = row
+            if let previous = previousRow(row) {
+                row.pricingModel = row.pricingModel ?? previous.pricingModel
+                row.pricingMode = row.pricingMode ?? previous.pricingMode
+            }
             let priorityMetadata = row.turnID.flatMap { priorityTurns[$0] }
             let isPriority = priorityMetadata != nil || row.pricingMode == "priority"
-            let pricedModel = priorityMetadata.map { Self.codexPriorityPricingModel(for: row, priorityMetadata: $0) }
+            row.pricingModel = priorityMetadata.map { Self.codexPriorityPricingModel(for: row, priorityMetadata: $0) }
                 ?? row.pricingModel
                 ?? row.model
-            return CodexUsageRow(
-                day: row.day,
-                model: row.model,
-                rawModel: row.rawModel,
-                turnID: row.turnID,
-                eventIndex: row.eventIndex,
-                timestampUnixMs: row.timestampUnixMs,
-                input: row.input,
-                cached: row.cached,
-                output: row.output,
-                reasoning: row.reasoning,
-                knownCostNanos: row.knownCostNanos,
-                unpricedTokens: row.unpricedTokens,
-                pricingModel: pricedModel,
-                pricingMode: isPriority ? "priority" : "standard")
+            row.pricingMode = isPriority ? "priority" : "standard"
+            return row
         }
     }
 
@@ -1168,9 +1161,7 @@ extension CostUsageScanner {
         let replaceCachedRows = context.dropDeferredCodexRows || input.cached?.hasCurrentCodexParser != true
         let migratedCached = replaceCachedRows
             ? nil : input.cached.map { Self.codexFileUsageWithPricingMetadata($0, context: context) }
-        var usageDays = replaceCachedRows
-            ? [:]
-            : Self.fileDaysOutsideScanWindow(migratedCached?.days ?? [:], range: context.range)
+        var usageDays = Self.fileDaysOutsideScanWindow(migratedCached?.days ?? [:], range: context.range)
 
         let parsed = try Self.parseCodexFileCancellable(
             fileURL: input.fileURL,
@@ -1200,11 +1191,19 @@ extension CostUsageScanner {
             context.resources.projectPathResolver.canonicalProjectPath(for: $0)
         } ?? input.cached?.canonicalProjectPath ?? context.resources.projectPathResolver
             .canonicalProjectPath(for: projectPath)
-        let uniqueRows = Self.uniqueCodexRows(
-            rows: parsed.rows,
-            sessionId: sessionId,
-            fileIdentity: input.metadata.path,
-            state: &state)
+        // Trace pruning must not erase observed pricing for an unchanged request.
+        let previousRows = Dictionary(
+            (migratedCached?.codexRows ?? []).map {
+                (Self.codexUsageRowKey(sessionId: migratedCached?.sessionId, row: $0), $0)
+            }, uniquingKeysWith: { first, _ in first })
+        let uniqueRows = Self.codexRowsWithPricingMetadata(
+            Self.uniqueCodexRows(
+                rows: parsed.rows,
+                sessionId: sessionId,
+                fileIdentity: input.metadata.path,
+                state: &state),
+            priorityTurns: context.resources.priorityTurns,
+            preservingPricingFrom: { previousRows[Self.codexUsageRowKey(sessionId: sessionId, row: $0)] })
         context.workRecorder?.record(processed: uniqueRows.count, repriced: uniqueRows.count)
         let duplicateWithoutUniqueUsage = sessionId.map { state.contributingSessionIds.contains($0) } == true
             && uniqueRows.isEmpty
@@ -1239,34 +1238,27 @@ extension CostUsageScanner {
             canonicalProjectPath: canonicalProjectPath,
             codexSession: parsedCodexSession.isEmpty ? nil : parsedCodexSession,
             codexCostNanos: Self.mergeCostMaps(
-                replaceCachedRows
-                    ? nil
-                    : Self.costMapOutsideScanWindow(migratedCached?.codexCostNanos, range: context.range),
+                Self.costMapOutsideScanWindow(migratedCached?.codexCostNanos, range: context.range),
                 Self.codexCostNanos(rows: uniqueRows, range: context.range)),
             codexPrioritySurchargeNanos: nil,
             codexStandardCostNanos: nil,
             codexPriorityCostNanos: nil,
             codexStandardTokens: Self.mergeIntMaps(
-                replaceCachedRows
-                    ? nil
-                    : Self.intMapOutsideScanWindow(migratedCached?.codexStandardTokens, range: context.range),
+                Self.intMapOutsideScanWindow(migratedCached?.codexStandardTokens, range: context.range),
                 modeTokens.standard),
             codexPriorityTokens: Self.mergeIntMaps(
-                replaceCachedRows
-                    ? nil
-                    : Self.intMapOutsideScanWindow(migratedCached?.codexPriorityTokens, range: context.range),
+                Self.intMapOutsideScanWindow(migratedCached?.codexPriorityTokens, range: context.range),
                 modeTokens.priority),
-            codexTurnIDs: replaceCachedRows
-                ? Self.codexTurnIDs(rows: uniqueRows)
-                : Self.mergeCodexTurnIDs(migratedCached?.codexTurnIDs, rows: uniqueRows),
-            codexRows: Self.codexRowsWithPricingMetadata(
-                replaceCachedRows
-                    ? uniqueRows
-                    : Self.mergeCodexRows(
-                        migratedCached?.codexRows,
-                        rows: uniqueRows,
-                        sessionId: sessionId) ?? [],
-                priorityTurns: context.resources.priorityTurns),
+            codexTurnIDs: Self.mergeCodexTurnIDs(migratedCached?.codexTurnIDs, rows: uniqueRows),
+            codexRows: Self.mergeCodexRows(
+                migratedCached?.codexRows?.filter {
+                    !CostUsageDayRange.isInRange(
+                        dayKey: $0.day,
+                        since: context.range.scanSinceKey,
+                        until: context.range.scanUntilKey)
+                },
+                rows: uniqueRows,
+                sessionId: sessionId) ?? [],
             codexTokenSnapshots: parsed.tokenSnapshots,
             codexTokenCheckpoints: Self.codexTokenCheckpoints(for: parsed.tokenSnapshots),
             codexTokenTimestampsMonotonic: Self.codexTokenTimestampsAreMonotonic(
