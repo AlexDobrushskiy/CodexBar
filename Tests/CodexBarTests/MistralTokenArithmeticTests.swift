@@ -3,6 +3,39 @@ import Testing
 @testable import CodexBarCore
 
 struct MistralTokenArithmeticTests {
+    @Test
+    func `representable signed final totals do not depend on lane order`() throws {
+        let cases: [([Int], Int)] = [
+            ([Int.max, 1, -1], Int.max),
+            ([Int.min, -1, 1], Int.min),
+            ([Int.max, Int.min, 1], 0),
+            ([Int.max, Int.max, Int.min], Int.max - 1),
+        ]
+        for (values, expected) in cases {
+            for lanes in Self.permutations(values) {
+                let snapshot = try Self.parse(Self.completion(lanes))
+                let decoded = try JSONDecoder().decode(
+                    MistralUsageSnapshot.self, from: JSONEncoder().encode(snapshot))
+                for candidate in [snapshot, decoded] {
+                    #expect(candidate.checkedTotalTokens == expected)
+                    #expect(candidate.daily.first?.checkedTotalTokens == expected)
+                    #expect(candidate.daily.first?.totalTokens == expected)
+                    #expect(candidate.daily.first?.models.first?.checkedTotalTokens == expected)
+                    #expect(candidate.daily.first?.models.first?.totalTokens == expected)
+                }
+            }
+        }
+    }
+
+    @Test
+    func `unrepresentable final totals fail in every lane order`() throws {
+        for values in [[Int.max, 1, 0], [Int.min, -1, 0], [Int.max, Int.max, 1], [Int.min, Int.min, -1]] {
+            for lanes in Self.permutations(values) {
+                try Self.expectOverflow(Self.completion(lanes))
+            }
+        }
+    }
+
     @Test(arguments: [[Int.max, 1], [Int.min, -1], [Int.max, 1, -1]])
     func `actual lane additions reject overflow before publishing counts`(values: [Int]) throws {
         try Self.expectOverflow(["completion": ["models": ["fixture": ["input": values.map { Self.entry($0) }]]]])
@@ -139,6 +172,20 @@ struct MistralTokenArithmeticTests {
             "billing_metric": "fixture",
             "billing_group": "unit",
         ]
+    }
+
+    private static func permutations(_ values: [Int]) -> [[Int]] {
+        [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)].map {
+            [values[$0.0], values[$0.1], values[$0.2]]
+        }
+    }
+
+    private static func completion(_ lanes: [Int]) -> [String: Any] {
+        ["completion": ["models": ["fixture": [
+            "input": [self.entry(lanes[0])],
+            "cached": [self.entry(lanes[1])],
+            "output": [self.entry(lanes[2])],
+        ]]]]
     }
 
     private static func parse(_ categories: [String: Any]) throws -> MistralUsageSnapshot {

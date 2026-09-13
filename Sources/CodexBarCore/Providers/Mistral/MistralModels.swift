@@ -103,11 +103,14 @@ public struct MistralDailyUsageBucket: Codable, Equatable, Sendable, Identifiabl
         }
 
         public var totalTokens: Int {
-            self.inputTokens + self.cachedTokens + self.outputTokens
+            guard let total = self.checkedTotalTokens else {
+                preconditionFailure("Mistral token count exceeds supported range")
+            }
+            return total
         }
 
         package var checkedTotalTokens: Int? {
-            CheckedSum.integers([self.inputTokens, self.cachedTokens, self.outputTokens])
+            MistralTokenMath.total(input: self.inputTokens, cached: self.cachedTokens, output: self.outputTokens)
         }
 
         public init(name: String, cost: Double, inputTokens: Int, cachedTokens: Int, outputTokens: Int) {
@@ -131,11 +134,14 @@ public struct MistralDailyUsageBucket: Codable, Equatable, Sendable, Identifiabl
     }
 
     public var totalTokens: Int {
-        self.inputTokens + self.cachedTokens + self.outputTokens
+        guard let total = self.checkedTotalTokens else {
+            preconditionFailure("Mistral token count exceeds supported range")
+        }
+        return total
     }
 
     package var checkedTotalTokens: Int? {
-        CheckedSum.integers([self.inputTokens, self.cachedTokens, self.outputTokens])
+        MistralTokenMath.total(input: self.inputTokens, cached: self.cachedTokens, output: self.outputTokens)
     }
 
     public init(
@@ -170,7 +176,8 @@ public struct MistralUsageSnapshot: Codable, Sendable {
     public let updatedAt: Date
 
     package var checkedTotalTokens: Int? {
-        CheckedSum.integers([self.totalInputTokens, self.totalCachedTokens, self.totalOutputTokens])
+        MistralTokenMath.total(
+            input: self.totalInputTokens, cached: self.totalCachedTokens, output: self.totalOutputTokens)
     }
 
     public init(

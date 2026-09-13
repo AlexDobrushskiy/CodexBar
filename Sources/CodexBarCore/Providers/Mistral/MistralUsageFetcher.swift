@@ -469,7 +469,7 @@ private struct TokenCounts {
     }
 
     func total() throws -> Int {
-        guard let total = CheckedSum.integers([self.input, self.cached, self.output]) else {
+        guard let total = MistralTokenMath.total(input: self.input, cached: self.cached, output: self.output) else {
             throw MistralUsageError.parseFailed("Token count exceeds supported range")
         }
         return total
