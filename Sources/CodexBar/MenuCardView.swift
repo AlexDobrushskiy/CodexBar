@@ -1474,7 +1474,7 @@ extension UsageMenuCardView.Model {
             weeklyResetText = nil
             weeklyDetailText = detail
         }
-        if [.kilo, .litellm, .chutes].contains(input.provider),
+        if [.kilo, .litellm, .chutes, .longcat].contains(input.provider),
            let detail = weekly.resetDescription,
            !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {

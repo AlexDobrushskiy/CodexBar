@@ -51,6 +51,13 @@ public enum LongCatProviderDescriptor {
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: false,
                 noDataMessage: { "LongCat cost summary is not supported." }),
+            presentation: ProviderUsagePresentation(
+                menuCard: ProviderMenuCardPresentation(
+                    showsPrimaryBalanceDescription: true,
+                    hidesPrimaryResetWithoutDate: true),
+                menu: ProviderMenuDescriptorPresentation(
+                    primaryDescriptionIsDetail: { _ in true },
+                    secondaryDescriptionMode: .detailWhenResetDatePresent)),
             fetchPlan: ProviderFetchPlan(
                 sourceModes: [.auto, .web],
                 pipeline: ProviderFetchPipeline(resolveStrategies: { _ in [LongCatWebFetchStrategy()] })),
