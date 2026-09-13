@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Mistral: reject overflowing billing token totals without crashing, preserve cost-only usage, and keep valid costs visible when a model ranking cannot be represented.
 - Alibaba and Qwen Cloud: preserve reserved characters in console security tokens and gateway request parameters.
 
 ## 0.60.1 — 2026-09-12

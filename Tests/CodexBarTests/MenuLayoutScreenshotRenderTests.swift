@@ -1044,7 +1044,7 @@ extension MenuLayoutScreenshotRenderTests {
         }
     }
 
-    static func pngDataWithWindow(hosting: NSHostingView<AnyView>) -> Data? {
+    static func pngDataWithWindow(hosting: NSView) -> Data? {
         // Native List rows need a window to materialize, but it never needs to be ordered onscreen.
         let size = hosting.fittingSize
         hosting.frame = CGRect(origin: .zero, size: size)
