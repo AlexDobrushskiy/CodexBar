@@ -749,14 +749,18 @@ struct CostUsageScannerBreakdownTests {
             "payload": ["session_id": "legacy-cost-session"],
         ]
         let turnContext = self.codexTurnContext(timestamp: iso0, model: model)
+        let olderTokenCount = self.codexTokenCount(
+            timestamp: env.isoString(for: olderDay),
+            model: model,
+            total: (input: 20, cached: 0, output: 0))
         let firstTokenCount = self.codexTokenCount(
             timestamp: iso1,
             model: model,
-            total: (input: 10, cached: 0, output: 0))
+            total: (input: 30, cached: 0, output: 0))
         let fileURL = try env.writeCodexSessionFile(
             day: day,
             filename: "session.jsonl",
-            contents: env.jsonl([sessionMeta, turnContext, firstTokenCount]))
+            contents: env.jsonl([sessionMeta, turnContext, olderTokenCount, firstTokenCount]))
 
         var options = CostUsageScanner.Options(
             codexSessionsRoot: env.codexSessionsRoot,
@@ -776,7 +780,7 @@ struct CostUsageScannerBreakdownTests {
         let path = try #require(cache.files.keys.first)
         var cachedUsage = try #require(cache.files[path])
         #expect(cachedUsage.sessionId == "legacy-cost-session")
-        #expect(cachedUsage.lastCountedTotals?.input == 10)
+        #expect(cachedUsage.lastCountedTotals?.input == 30)
         cachedUsage.codexCostNanos = nil
         cachedUsage.codexRows = [
             CostUsageScanner.CodexUsageRow(
@@ -804,7 +808,7 @@ struct CostUsageScannerBreakdownTests {
         let secondTokenCount = self.codexTokenCount(
             timestamp: iso2,
             model: model,
-            total: (input: 15, cached: 0, output: 0))
+            total: (input: 35, cached: 0, output: 0))
         let appended = try "\n" + env.jsonl([secondTokenCount])
         let handle = try FileHandle(forWritingTo: fileURL)
         try handle.seekToEnd()

@@ -325,10 +325,16 @@ enum CostUsageScanner {
         let projectPath: String?
         let codexSession: CostUsageCodexSessionMetadata
         let rows: [CodexUsageRow]
+        let nextUsageRowIndex: Int
         let tokenSnapshots: [CostUsageCodexTokenSnapshot]
         let jsonlResumeState: CostUsageJsonl.ResumeState?
         let bufferedSubagentLines: [CodexBufferedFastLine]?
         let bufferedUnresolvedForkLines: [CodexBufferedFastLine]?
+    }
+
+    struct CodexPricingEvidence: Codable, Equatable {
+        let pricingModel: String?
+        let pricingMode: String?
     }
 
     struct CodexUsageRow: Codable, Equatable {
@@ -4180,6 +4186,7 @@ enum CostUsageScanner {
                 startedAtUnixMs: nil,
                 latestActivityUnixMs: nil),
             rows: [],
+            nextUsageRowIndex: initialCodexUsageRowIndex,
             tokenSnapshots: [],
             jsonlResumeState: nil,
             bufferedSubagentLines: nil,
@@ -5177,6 +5184,7 @@ enum CostUsageScanner {
             projectPath: projectPath,
             codexSession: codexSession,
             rows: rows,
+            nextUsageRowIndex: codexUsageRowIndex,
             tokenSnapshots: tokenSnapshots,
             jsonlResumeState: jsonlResumeState,
             bufferedSubagentLines: parsedBytes < effectiveTargetSize

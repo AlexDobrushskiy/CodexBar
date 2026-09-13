@@ -348,6 +348,7 @@ extension CostUsageStore {
         var divergentTotals: Bool?
         var interleavedTotals: Bool?
         var parserRevision: Int?
+        var hasExactUsageRowIndex: Bool?
     }
 
     private struct StoredPriorityState: Codable {
@@ -521,6 +522,10 @@ extension CostUsageStore {
                 codexTurnIDs: details.hasTurnIDs ? CostUsageScanner.codexTurnIDs(rows: rows) ?? [] : nil,
                 codexWorkspaceContentFingerprint: details.workspaceFingerprint,
                 codexRows: details.hasRows ? restoredRows : nil,
+                codexNextUsageRowIndex: details.hasExactUsageRowIndex == true ? file.scanState.nextUsageRowIndex : nil,
+                codexPendingPricing: buffers.first { $0.kind == .pricingEvidence }.flatMap {
+                    try? JSONDecoder().decode([String: CostUsageScanner.CodexPricingEvidence].self, from: $0.payload)
+                },
                 codexTokenSnapshots: details.hasTokenSnapshots && tokenSnapshotsLoaded ? tokenSnapshots : nil,
                 codexTokenCheckpoints: details.hasTokenSnapshots && tokenSnapshotsLoaded
                     ? CostUsageScanner.codexTokenCheckpoints(for: tokenSnapshots) : nil,
@@ -922,7 +927,8 @@ extension CostUsageStore {
             hasSeenRawTotals: usage.seenRawTotals != nil,
             divergentTotals: usage.hasDivergentTotals,
             interleavedTotals: usage.hasInterleavedTotals,
-            parserRevision: usage.codexParserRevision)
+            parserRevision: usage.codexParserRevision,
+            hasExactUsageRowIndex: usage.codexNextUsageRowIndex != nil)
         let file = CostUsageStoreFile(
             path: path,
             inode: Self.inode(from: usage.codexScanFileId),
@@ -940,7 +946,8 @@ extension CostUsageStore {
                 isComplete: usage.codexScanComplete != false,
                 resumePayload: usage.codexJSONLResumeState.flatMap { try? JSONEncoder().encode($0) },
                 tokenTimestampsMonotonic: usage.codexTokenTimestampsMonotonic,
-                nextUsageRowIndex: CostUsageScanner.nextCodexUsageRowIndex(usage.codexRows),
+                nextUsageRowIndex: usage.codexNextUsageRowIndex ?? CostUsageScanner
+                    .nextCodexUsageRowIndex(usage.codexRows),
                 lastModel: usage.lastModel,
                 lastTurnID: usage.lastCodexTurnID,
                 fileIdentity: usage.codexScanFileId,
@@ -1010,7 +1017,7 @@ extension CostUsageStore {
         _ = self.upsertAccumulator(CostUsageStoreAccumulator(
             path: path,
             eventCount: tokenSnapshotsLoaded ? snapshotCount : baseline.snapshotCount,
-            nextUsageRowIndex: CostUsageScanner.nextCodexUsageRowIndex(usage.codexRows),
+            nextUsageRowIndex: usage.codexNextUsageRowIndex ?? CostUsageScanner.nextCodexUsageRowIndex(usage.codexRows),
             countedTotals: Self.totals(usage.lastCountedTotals),
             rawTotalsBaseline: Self.totals(usage.lastRawTotalsBaseline),
             rawTotalsWatermark: Self.totals(usage.lastRawTotalsWatermark),
@@ -1333,6 +1340,10 @@ extension CostUsageStore {
     }
 
     private func persistBuffers(path: String, usage: CostUsageFileUsage) {
+        let pricing = usage.codexPendingPricing.flatMap { try? JSONEncoder().encode($0) }
+        _ = self.replaceBufferedLines(path: path, kind: .pricingEvidence, lines: pricing.map {
+            [CostUsageStoreBufferedLine(path: path, kind: .pricingEvidence, lineIndex: 0, payload: $0)]
+        } ?? [])
         let pairs: [(CostUsageStoreBufferedLineKind, [CostUsageScanner.CodexBufferedFastLine]?)] = [
             (.subagent, usage.codexBufferedSubagentLines),
             (.unresolvedFork, usage.codexBufferedUnresolvedForkLines),

@@ -1023,6 +1023,7 @@ extension CostUsageStoreTests {
 
 extension CostUsageStoreTests {
     @Test(arguments: [
+        "aef0df6c73f8052c",
         "4969a789db679c93", // Released in 0.58.0.
         "c4fa7db2cf54bc41",
         "ca4bc3875600536f",
@@ -1052,6 +1053,7 @@ extension CostUsageStoreTests {
         let fixture = try StoreFixture()
         defer { fixture.remove() }
         #expect(CostUsageStore.compatiblePredecessorParserHashes == [
+            "aef0df6c73f8052c",
             "4969a789db679c93",
             "c4fa7db2cf54bc41",
             "ca4bc3875600536f",
@@ -1139,6 +1141,8 @@ extension CostUsageStoreTests {
         #expect(await predecessor.setMetadata(metadata))
         let before = await predecessor.readSnapshot()
 
+        try FileManager.default.removeItem(at: input)
+        #expect(!FileManager.default.fileExists(atPath: input.path))
         let current = CostUsageStore(cacheRoot: fixture.root)
         let after = await current.readSnapshot()
         #expect(after == before)
