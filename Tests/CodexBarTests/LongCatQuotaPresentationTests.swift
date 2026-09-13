@@ -54,11 +54,9 @@ struct LongCatQuotaPresentationTests {
         #expect(fuel.detailText == "Fuel pack: 200/500")
         #expect(fuel.resetText == (hasExpiry ? "Resets in 2h" : nil))
 
-        let settings = SettingsStore(
-            userDefaults: InMemoryUserDefaults(),
-            configStore: testConfigStore(suiteName: "LongCatQuotaPresentationTests-\(hasExpiry)"),
-            zaiTokenStore: NoopZaiTokenStore(),
-            syntheticTokenStore: NoopSyntheticTokenStore())
+        let settings = testSettingsStore(
+            suiteName: "LongCatQuotaPresentationTests-\(hasExpiry)",
+            userDefaults: InMemoryUserDefaults())
         settings.statusChecksEnabled = false
         let store = UsageStore(
             fetcher: UsageFetcher(environment: [:]),
