@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Alibaba and Qwen Cloud: preserve reserved characters in console security tokens and gateway request parameters.
+
 ## 0.60.1 — 2026-09-12
 
 ### Highlights
