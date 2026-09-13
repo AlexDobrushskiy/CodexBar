@@ -3,6 +3,44 @@
     <channel>
         <title>CodexBar</title>
         <item>
+            <title>0.60.1</title>
+            <pubDate>Sat, 12 Sep 2026 23:09:32 -0700</pubDate>
+            <link>https://raw.githubusercontent.com/steipete/CodexBar/main/appcast.xml</link>
+            <sparkle:version>144</sparkle:version>
+            <sparkle:shortVersionString>0.60.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>CodexBar 0.60.1</h2>
+<h3>Highlights</h3>
+<ul>
+<li><strong>Faster Codex activity refreshes:</strong> reuse unchanged local activity data instead of repeatedly validating and decoding it.</li>
+<li><strong>More reliable account cards:</strong> keep identity, usage, credits, and cached costs tied to the right account, and prefer fresh subscription dates.</li>
+<li><strong>Clearer provider quotas:</strong> distinguish unavailable z.ai limits from unused quotas and remove duplicate Antigravity rows without hiding distinct limits.</li>
+<li><strong>Authentication fixes:</strong> preserve special characters in Vertex AI, Gemini, Claude, and Antigravity refresh credentials, and retain useful Antigravity failure details.</li>
+</ul>
+<h3>Performance</h3>
+<ul>
+<li>Codex activity: reuse validated SQLite and decoded aggregate state across unchanged refreshes, preserving replacement, writer, and compatibility invalidation (#3593, related to #3247). Thanks @brzvsk!</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Codex: prefer fresh authorized subscription dates over stale cache metadata, and keep empty account cards from inheriting another account&#x27;s identity, usage, or credits (#3601).</li>
+<li>Token accounts: preserve provider account IDs when applying configured fallback labels in the app and CLI (#3606).</li>
+<li>Account cards: keep Grok&#x27;s cached local costs out of an account card that has no usage snapshot (#3604).</li>
+<li>z.ai: keep missing quota limits unavailable instead of displaying 100% remaining, preserving real zero usage, plan details, and optional analytics (#3590).</li>
+<li>Antigravity: suppress remote model variants that exactly mirror a known pool and reset, preserve distinct quota rows and their saved visibility, and prefer known usage over reset-only duplicates (#3583). Thanks @hhh2210!</li>
+<li>OAuth: preserve reserved characters in Gemini, Antigravity, and Claude refresh requests while retaining credential ownership (#3609).</li>
+<li>Vertex AI: preserve reserved characters in OAuth refresh credentials and reject successful responses that omit a usable access token (#3608).</li>
+<li>Antigravity: preserve the attempted CLI failure when an unavailable IDE fallback would otherwise replace it with misleading desktop launch guidance (#3595, related to #3146). Thanks @gpgpbm4h4y-gif!</li>
+<li>Grok: report an RPC deadline as a timeout even when process teardown closes stdout immediately (#3606).</li>
+<li>Codex: reject oversized numeric spend-limit reset timestamps without crashing, preserving valid limits and usage (#3589).</li>
+<li>Web dashboard: preserve account aliases and organization labels so Claude accounts sharing an email remain distinguishable, including in redacted mode (#3591, follow-up to #3082).</li>
+<li>Provider settings: preserve saved configuration for unavailable plugins when reordering providers, and localize Qoder and Qwen Cloud cookie-cache labels consistently (#3601, #3604).</li>
+</ul>
+<p><a href="https://github.com/steipete/CodexBar/blob/main/CHANGELOG.md">View full changelog</a></p>
+]]></description>
+            <enclosure url="https://github.com/steipete/CodexBar/releases/download/v0.60.1/CodexBar-macos-universal-0.60.1.zip" length="69956818" type="application/octet-stream" sparkle:edSignature="XC/eAvCB2p5S4DQtEqLv6Uk3nkR+8ajxaWSiWD6T0JpXDTZh2sCKhYDHdKItDidJvDByeHSStBUWFJlzTzRTBg=="/>
+        </item>
+        <item>
             <title>0.60.0</title>
             <pubDate>Sat, 12 Sep 2026 02:58:28 -0700</pubDate>
             <link>https://raw.githubusercontent.com/steipete/CodexBar/main/appcast.xml</link>
@@ -86,44 +124,6 @@
 <p><a href="https://github.com/steipete/CodexBar/blob/main/CHANGELOG.md">View full changelog</a></p>
 ]]></description>
             <enclosure url="https://github.com/steipete/CodexBar/releases/download/v0.59.0/CodexBar-macos-universal-0.59.0.zip" length="69368221" type="application/octet-stream" sparkle:edSignature="odgaAOoAYim7oaQZh7IYCKUHxAfy53ITouFrji/dXY64FxfkhvBL/BinFiKME3nN+EJzqsiry9lApOr0sTyhCA=="/>
-        </item>
-        <item>
-            <title>0.58.0</title>
-            <pubDate>Wed, 09 Sep 2026 21:05:54 -0700</pubDate>
-            <link>https://raw.githubusercontent.com/steipete/CodexBar/main/appcast.xml</link>
-            <sparkle:version>141</sparkle:version>
-            <sparkle:shortVersionString>0.58.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>CodexBar 0.58.0</h2>
-<h3>Highlights</h3>
-<ul>
-<li><strong>Daily spend ledger:</strong> inspect tokens, requests, and spending day by day in Usage &amp; Spend, with your selected time zone and clear labels for unavailable amounts (#2635).</li>
-<li><strong>More useful cost charts:</strong> hover over a daily bar in the menu to see its date, cost, and token count (#3413).</li>
-<li><strong>Menus that fit your workflow:</strong> choose visible usage rows, select session or weekly percentages, and add explicit reset countdowns or clocks to menu-bar layouts (#3196, #3124, #3481).</li>
-<li><strong>Clearer account quotas:</strong> compact account rows now show reset times beside the quotas they belong to (#3477).</li>
-</ul>
-<h3>Added</h3>
-<ul>
-<li>Usage &amp; Spend: add a daily provider ledger for tokens, requests, and spend, honoring selected time zones and distinguishing unknown amounts from zero usage (#2635). Thanks @sahilaidev!</li>
-<li>Inline cost charts: show each day's localized date, cost, and token count on hover without shifting the chart layout (#3413). Thanks @666ghj!</li>
-<li>Provider menus: choose visible usage rows across full and compact menus, Settings previews, and Overview; sync selections and restore hidden rows without changing fetching or alerts (#3196, #3182). Thanks @psufka and @J2TeamNNL!</li>
-<li>Menu bar: choose Auto, Session, or Weekly percent windows in provider settings while preserving custom layout tokens and the global icon style (#3124). Thanks @J2TeamNNL!</li>
-<li>Menu bar layouts: choose session or weekly reset countdowns and clocks, including conditional branches, with support for existing saved layouts (#3481, #3356). Thanks @vincent-peng!</li>
-<li>Account menus: show reset times beside compact account quotas, keeping each time tied to its account and quota window and honoring privacy settings (#3477). Thanks @TobitRE!</li>
-</ul>
-<h3>Fixed</h3>
-<ul>
-<li>OpenCodex local usage: aggregate costs and requests over the full requested history so All-history spend and daily ledger counts remain available (#2635).</li>
-<li>Codex local costs: exclude inherited records before an explicit subagent history boundary, including files with no child-owned usage yet, and refresh older cached counts without discarding stored history (#3527, related to #3524). Thanks @vnnkl!</li>
-<li>Token counts: promote rounded <code>1000K</code> and <code>1000M</code> values to <code>1M</code> and <code>1B</code>, preserve ordinary precision, and handle the full signed integer range without crashing (#3519, fixes #3518). Thanks @harjothkhara!</li>
-</ul>
-<h3>Development</h3>
-<ul>
-<li>Test runner: fail early when Python lacks required process-containment APIs and explain how to select a compatible interpreter (#3517, fixes #3515). Thanks @devYRPauli!</li>
-</ul>
-<p><a href="https://github.com/steipete/CodexBar/blob/main/CHANGELOG.md">View full changelog</a></p>
-]]></description>
-            <enclosure url="https://github.com/steipete/CodexBar/releases/download/v0.58.0/CodexBar-macos-universal-0.58.0.zip" length="69328078" type="application/octet-stream" sparkle:edSignature="HU/2gyhJLcpPk/FeZxSsp/2pX07DDYnUIg/ttJGisgf9l+dllUrAn0LZCmdYjSn2G/oRS2XyGWGfUis+smy4AA=="/>
         </item>
         <item>
             <title>0.14.0</title>
