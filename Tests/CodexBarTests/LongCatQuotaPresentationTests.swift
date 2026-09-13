@@ -3,6 +3,7 @@ import CodexBarCore
 import SwiftUI
 import Testing
 @testable import CodexBar
+@testable import CodexBarCLI
 
 @MainActor
 struct LongCatQuotaPresentationTests {
@@ -79,6 +80,40 @@ struct LongCatQuotaPresentationTests {
         #expect(text.contains("Fuel pack: 200/500"))
         #expect(!text.contains { $0.hasPrefix("Resets 250/") || $0.hasPrefix("Resets Fuel pack:") })
         #expect(text.contains { $0.hasPrefix("Resets ") } == hasExpiry)
+    }
+
+    @Test(arguments: [false, true])
+    func `CLI text and cards keep balances separate from expiry`(hasExpiry: Bool) throws {
+        let snapshot = self.snapshot(hasExpiry: hasExpiry)
+        let metadata = ProviderDescriptorRegistry.descriptor(for: .longcat).metadata
+        let card = CLICardsRenderer.makeCard(CLICardBuildInput(
+            provider: .longcat,
+            snapshot: snapshot,
+            credits: nil,
+            source: "web",
+            status: nil,
+            notes: [],
+            useColor: false,
+            resetStyle: .countdown,
+            weeklyWorkDays: nil,
+            now: Self.now))
+        let primary = try #require(card.metrics.first { $0.label == metadata.sessionLabel })
+        let fuel = try #require(card.metrics.first { $0.label == metadata.weeklyLabel })
+        #expect(primary.detailText == "250/1000")
+        #expect(primary.resetText == nil)
+        #expect(fuel.detailText == "Fuel pack: 200/500")
+        #expect(fuel.resetText == (hasExpiry ? "⏳ Resets in 2h" : nil))
+
+        let output = CLIRenderer.renderText(
+            provider: .longcat,
+            snapshot: snapshot,
+            credits: nil,
+            context: RenderContext(header: "LongCat", status: nil, useColor: false, resetStyle: .countdown),
+            now: Self.now)
+        #expect(output.contains("250/1000"))
+        #expect(output.contains("Fuel pack: 200/500"))
+        #expect(!output.contains("Resets 250/") && !output.contains("Resets Fuel pack:"))
+        #expect(output.contains("Resets in 2h") == hasExpiry)
     }
 
     @Test

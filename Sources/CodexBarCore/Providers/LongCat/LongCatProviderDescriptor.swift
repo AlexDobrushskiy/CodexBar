@@ -36,6 +36,7 @@ public enum LongCatProviderDescriptor {
                 widgetSelectable: false,
                 isPrimaryProvider: false,
                 usesAccountFallback: false,
+                usesDetailBackedWindow: true,
                 browserCookieOrder: self.browserCookieOrder,
                 dashboardURL: "https://longcat.chat/platform/",
                 statusPageURL: nil),
