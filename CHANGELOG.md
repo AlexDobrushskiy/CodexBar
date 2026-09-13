@@ -2,6 +2,9 @@
 
 ## 0.60.2 — Unreleased
 
+### Changes
+- Dependencies: update KeyboardShortcuts to 3.1.0, QuickJS to 0.16.2, the Linux release/static SDK toolchain to Swift 6.3.3, and Linux desktop CI to Node.js 26.
+
 ### Added
 - Codex: add the debug-only Workspaces project/session inspector with source, history and privacy updates, plus cancellation when its window closes (#3291). Thanks @AmrMohamad!
 
