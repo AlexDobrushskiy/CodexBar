@@ -485,6 +485,7 @@ CI and release builds install the static Linux SDK through `Scripts/install_swif
 `curl`, verifies the pinned SHA-256, and passes a local archive to `swift sdk install`, avoiding SwiftPM's Linux
 FoundationNetworking/TLS teardown crash. Portable lint checks cover checksum rejection, download failures, and installer
 failure propagation without downloading an SDK.
+Changes to the installer require a musl CI build.
 
 ### Format Code
 
