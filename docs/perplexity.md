@@ -54,7 +54,7 @@ variables. Browser-imported cookies are cached and invalid cached cookies are cl
 
 The menu-bar percent picker can explicitly show **Credits** or **Bonus credits**, including when the API reports no duration. These choices use the actual credit pools without inventing a session or weekly cadence. Automatic keeps the existing recurring → purchased → bonus consumption order.
 
-Purchased credits do not reset, so the menu displays that balance without a reset prefix.
+Purchased and bonus credits do not reset, so their balances remain details in menus and CLI output. Layout reset-time tokens require an actual reset date for credit-detail windows; amounts never stand in for a reset clock.
 
 ## CLI Usage
 
