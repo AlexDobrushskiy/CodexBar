@@ -932,6 +932,7 @@ final class MenuBarLayoutRenderer {
 
     private static func primaryLabel(data: MenuBarLayoutRenderData) -> String? {
         let descriptor = ProviderDescriptorRegistry.descriptor(for: data.provider)
+        if let label = descriptor.presentation.menuBarLayoutPrimaryLabel { return L(label) }
         guard descriptor.metadata.usesDetailBackedWindow, data.session?.windowMinutes == nil else { return nil }
         return descriptor.presentation.primarySemanticWindow == .session
             ? data.laneLabels.primary : data.laneLabels.secondary

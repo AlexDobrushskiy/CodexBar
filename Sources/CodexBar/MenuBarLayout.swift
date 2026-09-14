@@ -531,12 +531,11 @@ enum MenuBarLayoutSemanticWindowResolver {
     static func windows(
         provider: UsageProvider,
         snapshot: UsageSnapshot?)
-        -> (session: RateWindow?, weekly: RateWindow?)
+        -> ProviderSemanticWindows
     {
-        guard let snapshot else { return (nil, nil) }
-        let windows = ProviderDescriptorRegistry.descriptor(for: provider).presentation
+        guard let snapshot else { return ProviderSemanticWindows(session: nil, weekly: nil) }
+        return ProviderDescriptorRegistry.descriptor(for: provider).presentation
             .semanticWindows(snapshot: snapshot)
-        return (windows.session, windows.weekly)
     }
 
     /// The active model-scoped weekly carve-out (e.g. Claude's `claude-weekly-scoped-fable`
