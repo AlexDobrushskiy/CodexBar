@@ -94,6 +94,52 @@ struct AbacusMonthlyPercentTests {
     }
 
     @Test
+    func `editor and pace accessibility use the same provider window labels`() throws {
+        let snapshot = AbacusUsageSnapshot(
+            creditsUsed: 250, creditsTotal: 1000, resetsAt: self.now.addingTimeInterval(7200), planName: "Pro")
+            .toUsageSnapshot()
+        var proof: [String] = []
+        for (token, label): (MenuBarLayoutToken, String) in [
+            (.percent(window: .session), "Credits %"),
+            (.pace(window: .session), "Credits pace"),
+            (.windowResetCountdown(window: .session), "Credits: Resets in"),
+            (.windowResetAbsolute(window: .session), "Credits: Reset at"),
+        ] {
+            let actual = token.editorLabel(provider: .abacus)
+            proof.append(actual)
+            #expect(actual == label)
+            #expect(token.editorAccessibilityLabel(provider: .abacus) == label)
+        }
+        for pace in [nil, "On track"] {
+            let output = self.render(
+                provider: .abacus,
+                snapshot: snapshot,
+                layout: MenuBarLayout(lines: [[.pace(window: .session)]]),
+                showUsed: false,
+                sessionPace: pace)
+            proof.append(output.accessibilityLabel)
+            #expect(output.accessibilityLabel == "Credits pace \(pace ?? "unavailable")")
+        }
+        if let path = ProcessInfo.processInfo.environment["CODEXBAR_ABACUS_PERCENT_PROOF_DIR"] {
+            try proof.joined(separator: "\n").write(
+                to: URL(fileURLWithPath: path).appendingPathComponent("editor-labels.txt"),
+                atomically: true,
+                encoding: .utf8)
+        }
+        for provider in [UsageProvider.codex, .chutes, .kimi] {
+            #expect(MenuBarLayoutToken.percent(window: .session).editorLabel(provider: provider) == "Session %")
+            #expect(MenuBarLayoutToken.pace(window: .session).editorLabel(provider: provider) == "Session pace")
+        }
+        #expect(MenuBarLayoutToken.percent(window: .weekly).editorLabel(provider: .perplexity) == "Bonus credits %")
+        #expect(MenuBarLayoutToken.pace(window: .weekly).editorLabel(provider: .warp) == "Add-on credits pace")
+        #expect(MenuBarConditionalMetric.session.editorLabel(provider: .abacus) == "Credits %")
+        #expect(MenuBarConditionalMetric.sessionPace.editorLabel(provider: .abacus) == "Credits pace")
+        #expect(MenuBarConditionalMetric.sessionResetsIn.editorLabel(provider: .abacus) == "Credits resets in")
+        #expect(MenuBarConditionalMetric.weekly.editorLabel(provider: .perplexity) == "Bonus credits %")
+        #expect(MenuBarConditionalMetric.weeklyResetsIn.editorLabel(provider: .warp) == "Add-on credits resets in")
+    }
+
+    @Test
     func `real four and five hour session labels remain duration based`() {
         for (provider, minutes): (UsageProvider, Int) in [(.chutes, 240), (.codex, 300)] {
             let snapshot = UsageSnapshot(
@@ -117,7 +163,8 @@ struct AbacusMonthlyPercentTests {
         provider: UsageProvider,
         snapshot: UsageSnapshot,
         layout: MenuBarLayout,
-        showUsed: Bool) -> MenuBarLayoutRenderedTitle
+        showUsed: Bool,
+        sessionPace: String? = nil) -> MenuBarLayoutRenderedTitle
     {
         let semantic = MenuBarLayoutSemanticWindowResolver.windows(provider: provider, snapshot: snapshot)
         let automatic = MenuBarMetricWindowResolver.rateWindow(
@@ -137,7 +184,7 @@ struct AbacusMonthlyPercentTests {
             scopedWeeklyTitle: nil,
             automatic: MenuBarLayoutRenderWindow(automatic),
             automaticText: nil,
-            sessionPace: nil,
+            sessionPace: sessionPace,
             weeklyPace: nil,
             automaticPace: nil,
             runsOut: nil,

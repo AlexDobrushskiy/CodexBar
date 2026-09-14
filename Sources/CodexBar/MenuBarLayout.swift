@@ -6,6 +6,16 @@ enum PercentWindow: String, CaseIterable, Codable, Hashable, Sendable {
     case weekly
     case scopedWeekly
     case automatic
+
+    func providerLabel(provider: UsageProvider?) -> String? {
+        guard let provider else { return nil }
+        let presentation = ProviderDescriptorRegistry.descriptor(for: provider).presentation
+        return switch self {
+        case .session: presentation.menuBarLayoutPrimaryLabel.map(L)
+        case .weekly: presentation.menuBarLayoutSecondaryLabel.map(L)
+        case .scopedWeekly, .automatic: nil
+        }
+    }
 }
 
 /// Comparison unit of a conditional metric: drives the threshold range, the stepper increment, and the

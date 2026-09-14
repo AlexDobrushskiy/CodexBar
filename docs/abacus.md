@@ -47,7 +47,7 @@ retains its 30-day fallback; pace estimates require a real reset date.
 
 Explicit Credits selection uses the monthly allowance and announces Credits, rather than leaving a blank session
 lane or describing the billing month as hundreds of hours. Billing/reset timing and pacing retain the full month;
-Automatic selection is unchanged.
+Automatic selection is unchanged. Editor tokens, conditional metrics and pace accessibility use the same Credits label.
 
 ## CLI
 
