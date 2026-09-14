@@ -66,6 +66,19 @@ struct CodexSpendSourceDescriptor: Sendable {
     let request: CodexSpendScanRequest?
 }
 
+/// One configured Claude profile home (`providers[].claudeProfileHomePaths`) scanned as its own
+/// spend source next to the provider-level Claude ledger.
+struct ClaudeSpendScanRequest: Equatable, Sendable {
+    static let sourceIDPrefix = "claude:profile:"
+
+    let home: ClaudeProfileHome
+    let displayName: String
+
+    var sourceID: String {
+        Self.sourceIDPrefix + self.home.cacheIdentity
+    }
+}
+
 enum SpendDashboardRequestBuildMode: Equatable, Sendable {
     case refreshMissing
     case forceRefresh
@@ -90,6 +103,7 @@ struct SpendDashboardLoadRequest: Sendable {
     let unavailableSourceIDs: Set<String>
     let confirmedEmptySourceIDs: Set<String>
     let codexRequests: [CodexSpendScanRequest]
+    let claudeRequests: [ClaudeSpendScanRequest]
     let now: Date
     let force: Bool
     let independentRefreshPending: Bool
@@ -100,6 +114,7 @@ struct SpendDashboardLoadRequest: Sendable {
         unavailableSourceIDs: Set<String>,
         confirmedEmptySourceIDs: Set<String> = [],
         codexRequests: [CodexSpendScanRequest],
+        claudeRequests: [ClaudeSpendScanRequest] = [],
         now: Date,
         force: Bool,
         independentRefreshPending: Bool = false)
@@ -109,6 +124,7 @@ struct SpendDashboardLoadRequest: Sendable {
         self.unavailableSourceIDs = unavailableSourceIDs
         self.confirmedEmptySourceIDs = confirmedEmptySourceIDs
         self.codexRequests = codexRequests
+        self.claudeRequests = claudeRequests
         self.now = now
         self.force = force
         self.independentRefreshPending = independentRefreshPending
@@ -270,6 +286,9 @@ enum SpendDashboardSource {
             ? self.codexSources(settings: settings, store: store)
             : []
         let codexRequests = codexSources.compactMap(\.request)
+        let claudeRequests = providers.contains(.claude)
+            ? self.claudeRequests(settings: settings, store: store)
+            : []
         let configuration = self.configuration(
             settings: settings,
             store: store,
@@ -340,6 +359,7 @@ enum SpendDashboardSource {
             unavailableSourceIDs: unavailableSourceIDs,
             confirmedEmptySourceIDs: confirmedEmptySourceIDs,
             codexRequests: codexRequests,
+            claudeRequests: claudeRequests,
             now: captureNow,
             force: mode.forcesLoader,
             independentRefreshPending: providers.contains { provider in
@@ -433,6 +453,12 @@ enum SpendDashboardSource {
                 displayName: account.displayName,
                 modelProviderName: ProviderDescriptorRegistry.descriptor(for: .codex).metadata.displayName,
                 snapshot: snapshot))
+        }
+        for profile in request.claudeRequests {
+            guard !Task.isCancelled else { break }
+            guard let snapshot = try? await self.loadClaudeProfileSnapshot(profile, request: request, force: false)
+            else { continue }
+            inputs.append(self.claudeProfileInput(profile, snapshot: snapshot))
         }
         let openCodex = self.mergingOpenCodexInputsWithObservation(inputs, request: request)
         return SpendDashboardLoadResult(
@@ -560,6 +586,15 @@ enum SpendDashboardSource {
                         failedSourceIDs: failedSourceIDs,
                         invalidatedSourceIDs: invalidatedSourceIDs)
                 } catch {}
+            }
+        }
+        for profile in request.claudeRequests {
+            guard !Task.isCancelled else { break }
+            do {
+                let snapshot = try await self.loadClaudeProfileSnapshot(profile, request: request, force: request.force)
+                inputs.append(self.claudeProfileInput(profile, snapshot: snapshot))
+            } catch {
+                failedSourceIDs.insert(profile.sourceID)
             }
         }
         let lateInvalidatedSourceIDs = Set(request.codexRequests.compactMap { account in
@@ -695,6 +730,11 @@ enum SpendDashboardSource {
             "\(provider.rawValue):\(settings.providerConfigRevision(for: provider))"
         }
         parts.append("bucket:\(settings.costUsageBucketTimeZoneIdentifier)")
+        // Provider-specific by design: Claude profile homes and Codex accounts are the only per-provider
+        // source lists that change dashboard ownership without a provider config revision.
+        if providers.contains(.claude) {
+            parts.append(contentsOf: settings.claudeProfileHomePaths.map { "claude-profile:\($0)" })
+        }
         if providers.contains(.codex) {
             parts.append(contentsOf: settings.codexVisibleAccountProjection.visibleAccounts.map { account in
                 let homePath: String? = switch account.selectionSource {
@@ -1531,6 +1571,8 @@ final class SpendDashboardController {
         let invalidated = outcome.result.invalidatedSourceIDs
         let barrierFailed = capture.unavailableSourceIDs
         let forcedCodexIDs = Set(outcome.request.codexRequests.map { "codex:\($0.id)" })
+        // Claude profile homes are loader-owned rows too; the capture barrier never carries them.
+        let forcedProfileIDs = Set(outcome.request.claudeRequests.map(\.sourceID))
         let confirmedNonemptyInputs = outcome.confirmedNonemptyInputs
         let confirmedNonemptyIDs = Set(confirmedNonemptyInputs.map(\.id))
         var inputs = capture.capturedInputs.filter {
@@ -1550,7 +1592,8 @@ final class SpendDashboardController {
             !forceFailed.contains(input.id) &&
             !invalidated.contains(input.id) &&
             !outcome.confirmedEmptySourceIDs.contains(input.id) &&
-            (forcedCodexIDs.contains(input.id) || barrierFailed.contains(input.id))
+            (forcedCodexIDs.contains(input.id) || forcedProfileIDs.contains(input.id) ||
+                barrierFailed.contains(input.id))
         {
             inputs.append(input)
             capturedIDs.insert(input.id)
@@ -1602,7 +1645,42 @@ final class SpendDashboardController {
         let normalized = day.map { calendar.startOfDay(for: $0) }
         guard normalized != self.selectedDay else { return }
         self.selectedDay = normalized
+        // A day outside the current window would scope every panel to nothing; widen to the
+        // smallest supported range that still contains it.
+        if let normalized,
+           let range = Self.smallestDayRange(containing: normalized, now: self.nowProvider(), calendar: calendar),
+           range > self.selectedDays
+        {
+            self.selectDays(range)
+            return
+        }
         self.rebuildModel(publish: false)
+    }
+
+    /// Scopes every panel to the current bucket day.
+    func selectToday() {
+        self.selectDay(self.nowProvider())
+    }
+
+    /// Moves the single-day filter by `delta` days. With no day selected the step starts from today,
+    /// so one backward step lands on yesterday. Stepping past today clears the filter.
+    func stepSelectedDay(by delta: Int) {
+        let calendar = self.configuration?.bucketCalendar ?? .current
+        let today = calendar.startOfDay(for: self.nowProvider())
+        let base = self.selectedDay ?? today
+        guard let target = calendar.date(byAdding: .day, value: delta, to: base) else { return }
+        self.selectDay(target > today ? nil : target)
+    }
+
+    /// Smallest supported window (`7`, `30`, `90`, all) whose rolling range includes `day`; `nil` when the
+    /// day is in the future.
+    static func smallestDayRange(containing day: Date, now: Date, calendar: Calendar) -> Int? {
+        let today = calendar.startOfDay(for: now)
+        let start = calendar.startOfDay(for: day)
+        guard start <= today,
+              let distance = calendar.dateComponents([.day], from: start, to: today).day
+        else { return nil }
+        return self.supportedDayRanges.first { $0 > distance }
     }
 
     func refreshDateWindow(now: Date? = nil) {
@@ -1759,12 +1837,15 @@ final class SpendDashboardController {
     }
 
     private func provider(for sourceID: String) -> UsageProvider? {
+        // Provider-specific by design: account-scoped source ids are prefixed by their owning provider.
         if sourceID.hasPrefix("codex:") { return .codex }
+        if sourceID.hasPrefix(ClaudeSpendScanRequest.sourceIDPrefix) { return .claude }
         return UsageProvider(rawValue: sourceID)
     }
 
     private func displayName(for sourceID: String, provider: UsageProvider) -> String {
         self.configuration?.codexAccountDisplayNames[sourceID]
+            ?? self.loadedInputs.first { $0.id == sourceID }?.displayName
             ?? ProviderDescriptorRegistry.descriptor(for: provider).metadata.displayName
     }
 

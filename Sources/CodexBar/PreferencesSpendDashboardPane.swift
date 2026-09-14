@@ -222,36 +222,65 @@ struct SpendDashboardPane: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(L("Usage & Spend"))
-                    .font(.title2.weight(.semibold))
-                Text(L("Local estimated cost history across supported providers."))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Picker(L("Time range"), selection: self.daysBinding) {
-                Text(spendDashboardDayRangeText(7)).tag(7)
-                Text(spendDashboardDayRangeText(30)).tag(30)
-                Text(spendDashboardDayRangeText(90)).tag(90)
-                Text(spendDashboardDayRangeText(SpendDashboardSource.scanDays)).tag(SpendDashboardSource.scanDays)
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(width: 248)
-
-            Button {
-                self.store.refreshSpendDashboard(accounts: self.codexSpendScanRequests)
-            } label: {
-                if self.controller.isRefreshing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label(L("Refresh"), systemImage: "arrow.clockwise")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L("Usage & Spend"))
+                        .font(.title2.weight(.semibold))
+                    Text(L("Local estimated cost history across supported providers."))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
+                Spacer(minLength: 16)
+                Button {
+                    self.store.refreshSpendDashboard(accounts: self.codexSpendScanRequests)
+                } label: {
+                    if self.controller.isRefreshing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label(L("Refresh"), systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(self.controller.isRefreshing || !self.settings.costUsageEnabled)
             }
-            .disabled(self.controller.isRefreshing || !self.settings.costUsageEnabled)
+            HStack(spacing: 12) {
+                Picker(L("Time range"), selection: self.rangeBinding) {
+                    Text(L("Day")).tag(Self.dayRangeTag)
+                    Text(spendDashboardDayRangeText(7)).tag(7)
+                    Text(spendDashboardDayRangeText(30)).tag(30)
+                    Text(spendDashboardDayRangeText(90)).tag(90)
+                    Text(spendDashboardDayRangeText(SpendDashboardSource.scanDays))
+                        .tag(SpendDashboardSource.scanDays)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 300)
+                if let selectedDay = self.controller.selectedDay {
+                    SpendDayStepper(
+                        selectedDay: selectedDay,
+                        calendar: CostUsageBucketTimeZone.calendar(
+                            identifier: self.settings.costUsageBucketTimeZoneIdentifier),
+                        onStep: { self.controller.stepSelectedDay(by: $0) })
+                }
+                Spacer(minLength: 0)
+            }
         }
+    }
+
+    /// Picker tag for the single-day mode; the other tags are window lengths in days.
+    static let dayRangeTag = -1
+
+    private var rangeBinding: Binding<Int> {
+        Binding(
+            get: { self.controller.selectedDay == nil ? self.controller.selectedDays : Self.dayRangeTag },
+            set: { tag in
+                if tag == Self.dayRangeTag {
+                    self.controller.selectToday()
+                } else {
+                    self.controller.selectDay(nil)
+                    self.controller.selectDays(tag)
+                }
+            })
     }
 
     @ViewBuilder
@@ -543,11 +572,53 @@ struct SpendDashboardPane: View {
         }
         return names
     }
+}
 
-    private var daysBinding: Binding<Int> {
-        Binding(
-            get: { self.controller.selectedDays },
-            set: { self.controller.selectDays($0) })
+/// Day navigation shown while the single-day mode is active: step to earlier days or back toward today.
+struct SpendDayStepper: View {
+    let selectedDay: Date
+    let calendar: Calendar
+    let onStep: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button {
+                self.onStep(-1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .help(L("Previous day"))
+            Text(Self.label(for: self.selectedDay, calendar: self.calendar))
+                .frame(minWidth: 96)
+                .font(.callout.weight(.medium))
+            Button {
+                self.onStep(1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(self.isToday)
+            .help(L("Next day"))
+        }
+        .controlSize(.small)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L("Day"))
+    }
+
+    private var isToday: Bool {
+        self.calendar.isDate(self.selectedDay, inSameDayAs: Date())
+    }
+
+    static func label(for selectedDay: Date, now: Date = Date(), calendar: Calendar) -> String {
+        let today = calendar.startOfDay(for: now)
+        if calendar.isDate(selectedDay, inSameDayAs: today) {
+            return L("Today")
+        }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: today),
+           calendar.isDate(selectedDay, inSameDayAs: yesterday)
+        {
+            return L("Yesterday")
+        }
+        return SpendActivityDateFormatting.mediumDateString(selectedDay, calendar: calendar)
     }
 }
 

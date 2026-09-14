@@ -1195,6 +1195,8 @@ extension CLIServeWebUI {
             const histories = {};
             for (const row of rows) {
               if (!row || typeof row.provider !== "string") continue;
+              // Claude profile-home rows share the provider id; the ambient row owns the chart.
+              if (row.profileHome) continue;
               if (!Array.isArray(row.daily) || row.daily.length < 2) continue;
               histories[row.provider] = row.daily
                 .filter(day => day && typeof day.date === "string")

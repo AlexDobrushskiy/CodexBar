@@ -1579,3 +1579,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Dölj värdar som inte kan nås";
 "agent_sessions_hide_unreachable_subtitle" = "Dölj värdar när deras sessioner inte kan hämtas.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Igår";
+"All days" = "Alla dagar";
+"Previous day" = "Föregående dag";
+"Next day" = "Nästa dag";

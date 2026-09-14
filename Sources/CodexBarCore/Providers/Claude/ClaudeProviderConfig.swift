@@ -19,4 +19,11 @@ extension ProviderConfig {
     public var sanitizedClaudeSwapExecutablePath: String? {
         SettingsValue.cleaned(self.claudeSwapExecutablePath)
     }
+
+    /// Extra Claude Code config roots (`CLAUDE_CONFIG_DIR` homes) scanned as separate local cost ledgers.
+    /// Machine-local by design; never synced.
+    public var claudeProfileHomePaths: [String]? {
+        get { self.extensionValue(forKey: "claudeProfileHomePaths") }
+        set { self.setExtensionValue(newValue, forKey: "claudeProfileHomePaths") }
+    }
 }

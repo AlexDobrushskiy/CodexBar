@@ -490,8 +490,17 @@ struct SpendDashboardModel: Equatable, Sendable {
                 bounds: bounds,
                 calendar: calendar)
         }
-        let providers = Self.providerRows(summaries)
-        let scopedSummaries = Self.summaries(summaries, matching: selectedDay)
+        // A selected day scopes every total, row, and breakdown to that single day; only the daily
+        // chart and ledger keep the surrounding window so the day stays in context.
+        let scopeBounds = selectedDay.map { $0...$0 } ?? bounds
+        let scopedSummaries = selectedDay == nil ? summaries : inputs.map { classified in
+            Self.inputSummary(
+                input: classified.input,
+                costMultiplier: classified.costMultiplier,
+                bounds: scopeBounds,
+                calendar: calendar)
+        }
+        let providers = Self.providerRows(scopedSummaries)
         let modelSummaries = scopedSummaries.filter { summary in
             let summaryModelHistory = Self.modelSummary(summaries: [summary])
             if summary.totalCost != nil {
@@ -558,19 +567,19 @@ struct SpendDashboardModel: Equatable, Sendable {
             currencyCode: currencyCode,
             providers: providers,
             models: modelSummary.rows,
-            projects: Self.projectRows(summaries: summaries, bounds: bounds, calendar: calendar),
+            projects: Self.projectRows(summaries: scopedSummaries, bounds: scopeBounds, calendar: calendar),
             dailyPoints: dailyPoints,
             dailySummaries: Self.dailySummaries(summaries: summaries, calendar: calendar),
             totalTokens: Self.knownIntSum(providers.map(\.totalTokens)),
             totalCost: Self.knownCostSum(providers.map(\.totalCost)),
-            coveredDayCount: Self.commonCoverageDayCount(summaries: summaries, calendar: calendar),
+            coveredDayCount: Self.commonCoverageDayCount(summaries: scopedSummaries, calendar: calendar),
             chartDomain: Self.chartDomain(bounds: bounds, calendar: calendar),
             modelHistoryCompleteness: modelHistoryCompleteness,
             tokenMix: tokenMix,
             coverageAccumulator: coverage,
             provenance: provenance,
             meteredCost: hasMeteredCostAmount ? metered : nil,
-            sessions: Self.sessionRows(summaries: summaries, bounds: bounds, calendar: calendar),
+            sessions: Self.sessionRows(summaries: scopedSummaries, bounds: scopeBounds, calendar: calendar),
             overflowModelCount: overflowCount,
             selectedDay: selectedDay,
             hourlyPoints: hourlyPoints,
@@ -579,23 +588,6 @@ struct SpendDashboardModel: Equatable, Sendable {
                 selectedDay: selectedDay,
                 calendar: calendar),
             timeZone: calendar.timeZone)
-    }
-
-    private static func summaries(_ summaries: [InputSummary], matching selectedDay: Date?) -> [InputSummary] {
-        guard let selectedDay else { return summaries }
-        return summaries.map { summary in
-            InputSummary(
-                input: summary.input,
-                costMultiplier: summary.costMultiplier,
-                entries: summary.entries.filter { $0.day == selectedDay },
-                totalTokens: summary.totalTokens,
-                totalCost: summary.totalCost,
-                coveredInterval: summary.coveredInterval,
-                coveredDayCount: summary.coveredDayCount,
-                hasCompleteTokenHistory: summary.hasCompleteTokenHistory,
-                hasCompleteRequestHistory: summary.hasCompleteRequestHistory,
-                hasInvalidCostHistory: summary.hasInvalidCostHistory)
-        }
     }
 
     private static func inputSummary(

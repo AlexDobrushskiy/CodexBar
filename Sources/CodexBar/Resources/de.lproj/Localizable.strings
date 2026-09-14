@@ -1580,3 +1580,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Nicht erreichbare Hosts ausblenden";
 "agent_sessions_hide_unreachable_subtitle" = "Hosts ausblenden, wenn ihre Sitzungen nicht abgerufen werden können.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Gestern";
+"All days" = "Alle Tage";
+"Previous day" = "Vorheriger Tag";
+"Next day" = "Nächster Tag";

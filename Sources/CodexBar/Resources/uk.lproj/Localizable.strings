@@ -1580,3 +1580,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Приховувати недоступні вузли";
 "agent_sessions_hide_unreachable_subtitle" = "Приховувати вузли, якщо не вдалося отримати їхні сеанси.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Вчора";
+"All days" = "Усі дні";
+"Previous day" = "Попередній день";
+"Next day" = "Наступний день";

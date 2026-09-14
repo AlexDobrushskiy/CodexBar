@@ -1611,3 +1611,9 @@
 
 "agent_sessions_hide_unreachable_title" = "隱藏無法連線的主機";
 "agent_sessions_hide_unreachable_subtitle" = "擷取工作階段失敗時隱藏該主機。";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "昨天";
+"All days" = "所有日期";
+"Previous day" = "前一天";
+"Next day" = "後一天";

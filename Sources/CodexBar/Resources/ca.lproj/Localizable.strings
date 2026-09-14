@@ -1582,3 +1582,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Amaga els amfitrions inaccessibles";
 "agent_sessions_hide_unreachable_subtitle" = "Amaga els amfitrions quan falla la consulta de les seves sessions.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Ahir";
+"All days" = "Tots els dies";
+"Previous day" = "Dia anterior";
+"Next day" = "Dia següent";

@@ -258,6 +258,27 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
     visible, and never derives quota percentages from spend or token totals.
 
 ## Cost usage (local log scan)
+- Profile homes (`providers[].claudeProfileHomePaths`, config file only):
+  - Claude Code isolates a profile through `CLAUDE_CONFIG_DIR`; each such root has its own `projects/` store.
+    Add extra roots here to scan each as a **separate ledger** next to the ambient root, e.g. a Bedrock work
+    profile started with `CLAUDE_CONFIG_DIR=~/.claude-work claude`.
+  - Each path must be absolute or start with `~/`, and contain a `projects/` directory. The ambient root
+    (`~/.claude` or the current `$CLAUDE_CONFIG_DIR`) is skipped if listed, so a profile never double counts.
+  - A profile scans only `<root>/projects/**/*.jsonl` — no Claude Desktop stores and no pi/OMP mirrors.
+  - Each profile keeps its own cache under `~/Library/Caches/CodexBar/cost-usage/claude-profiles/<id>/`.
+  - Surfaces: Settings → Usage & Spend rows named `Claude · ~/.claude-work`; `codexbar cost --provider claude`
+    prints one extra section per profile and `--format json` emits one extra `claude` payload per profile
+    carrying `"profileHome": "~/.claude-work"`; `codexbar serve` `/cost` returns the same payloads.
+  - Machine-local by design; never synced. Quota, OAuth, and the menu card are unaffected.
+
+  ```json
+  {
+    "id": "claude",
+    "claudeProfileHomePaths": [
+      "~/.claude-work"
+    ]
+  }
+  ```
 - Source roots:
   - Native Claude logs:
     - `$CLAUDE_CONFIG_DIR` selects one literal directory and uses `<root>/projects`; commas are part of its path.

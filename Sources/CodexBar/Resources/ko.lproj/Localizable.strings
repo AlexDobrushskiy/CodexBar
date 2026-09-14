@@ -1549,3 +1549,9 @@
 
 "agent_sessions_hide_unreachable_title" = "연결할 수 없는 호스트 숨기기";
 "agent_sessions_hide_unreachable_subtitle" = "세션을 가져오지 못한 호스트를 숨깁니다.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "어제";
+"All days" = "모든 날";
+"Previous day" = "이전 날";
+"Next day" = "다음 날";

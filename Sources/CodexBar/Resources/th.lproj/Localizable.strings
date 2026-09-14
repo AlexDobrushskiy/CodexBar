@@ -1584,3 +1584,9 @@
 
 "agent_sessions_hide_unreachable_title" = "ซ่อนโฮสต์ที่เข้าถึงไม่ได้";
 "agent_sessions_hide_unreachable_subtitle" = "ซ่อนโฮสต์เมื่อดึงข้อมูลเซสชันไม่สำเร็จ";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "เมื่อวาน";
+"All days" = "ทุกวัน";
+"Previous day" = "วันก่อนหน้า";
+"Next day" = "วันถัดไป";

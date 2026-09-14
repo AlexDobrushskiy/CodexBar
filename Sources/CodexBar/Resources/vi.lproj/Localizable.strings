@@ -1581,3 +1581,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Ẩn máy chủ không thể truy cập";
 "agent_sessions_hide_unreachable_subtitle" = "Ẩn máy chủ khi không lấy được các phiên của máy chủ đó.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Hôm qua";
+"All days" = "Tất cả các ngày";
+"Previous day" = "Ngày trước";
+"Next day" = "Ngày sau";

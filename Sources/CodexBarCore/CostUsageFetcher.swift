@@ -206,6 +206,7 @@ public struct CostUsageFetcher: Sendable {
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
         codexHomePath: String? = nil,
+        claudeConfigRoot: String? = nil,
         historyDays: Int = 30,
         cursorCookieHeaderOverride: String? = nil,
         allowPricingRefresh: Bool = true,
@@ -219,6 +220,7 @@ public struct CostUsageFetcher: Sendable {
             forceRefresh: forceRefresh,
             allowVertexClaudeFallback: allowVertexClaudeFallback,
             codexHomePath: codexHomePath,
+            claudeConfigRoot: claudeConfigRoot,
             historyDays: historyDays,
             cursorCookieHeaderOverride: cursorCookieHeaderOverride,
             allowPricingRefresh: allowPricingRefresh,
@@ -235,6 +237,7 @@ public struct CostUsageFetcher: Sendable {
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
         codexHomePath: String? = nil,
+        claudeConfigRoot: String? = nil,
         historyDays: Int = 30,
         cursorCookieHeaderOverride: String? = nil,
         allowPricingRefresh: Bool = true,
@@ -254,6 +257,7 @@ public struct CostUsageFetcher: Sendable {
             forceRefresh: forceRefresh,
             allowVertexClaudeFallback: allowVertexClaudeFallback,
             codexHomePath: codexHomePath,
+            claudeConfigRoot: claudeConfigRoot,
             historyDays: historyDays,
             cursorCookieHeaderOverride: cursorCookieHeaderOverride,
             allowPricingRefresh: allowPricingRefresh,
@@ -365,10 +369,25 @@ public struct CostUsageFetcher: Sendable {
 
     private static let establishedEmptyCodexDailyReport = CostUsageDailyReport(data: [], summary: nil)
 
+    /// Provider-specific by design: scoped Codex homes and Claude profile homes exclude ambient Pi sessions
+    /// from their per-profile totals; ambient scans keep merging them.
+    private static func shouldMergeAmbientPiUsage(
+        provider: UsageProvider,
+        codexHomePath: String?,
+        claudeConfigRoot: String?) -> Bool
+    {
+        switch provider {
+        case .codex: codexHomePath?.isEmpty != false
+        case .claude: claudeConfigRoot?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        default: true
+        }
+    }
+
     private static func resolvedScannerOptions(
         _ override: CostUsageScanner.Options?,
         provider: UsageProvider,
-        codexHomePath: String?) -> CostUsageScanner.Options
+        codexHomePath: String?,
+        claudeConfigRoot: String? = nil) -> CostUsageScanner.Options
     {
         var options = override ?? CostUsageScanner.Options()
         // Provider-specific by design: Codex managed profiles relocate sessions and archived_sessions roots.
@@ -378,6 +397,18 @@ public struct CostUsageFetcher: Sendable {
         {
             options.codexSessionsRoot = URL(fileURLWithPath: codexHomePath, isDirectory: true)
                 .appendingPathComponent("sessions", isDirectory: true)
+        }
+        // Provider-specific by design: a Claude profile home scans only its own `projects/` transcripts,
+        // never the ambient root or Claude Desktop stores, so each profile stays a separate ledger.
+        if provider == .claude,
+           let claudeConfigRoot = claudeConfigRoot?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !claudeConfigRoot.isEmpty
+        {
+            options.claudeProjectsRoots = [
+                URL(fileURLWithPath: claudeConfigRoot, isDirectory: true)
+                    .appendingPathComponent("projects", isDirectory: true)
+                    .standardizedFileURL,
+            ]
         }
         return options
     }
@@ -389,6 +420,7 @@ public struct CostUsageFetcher: Sendable {
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
         codexHomePath: String? = nil,
+        claudeConfigRoot: String? = nil,
         historyDays: Int = 30,
         cursorCookieHeaderOverride: String? = nil,
         allowPricingRefresh: Bool = true,
@@ -431,7 +463,8 @@ public struct CostUsageFetcher: Sendable {
         let fallbackCalendar = Self.resolvedScannerOptions(
             overrideScannerOptions,
             provider: provider,
-            codexHomePath: codexHomePath).calendar
+            codexHomePath: codexHomePath,
+            claudeConfigRoot: claudeConfigRoot).calendar
         if provider == .cursor {
             if let local = await self.loadCursorLocalSnapshot(
                 now: now, historyDays: clampedHistoryDays, calendar: fallbackCalendar)
@@ -475,12 +508,15 @@ public struct CostUsageFetcher: Sendable {
         var options = Self.resolvedScannerOptions(
             overrideScannerOptions,
             provider: provider,
-            codexHomePath: codexHomePath)
+            codexHomePath: codexHomePath,
+            claudeConfigRoot: claudeConfigRoot)
         // Rolling window is inclusive, so a 30-day display starts 29 days before `now`.
         let since = options.calendar.date(byAdding: .day, value: -(clampedHistoryDays - 1), to: now) ?? now
         let scopedCodexHomePath = codexHomePath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Provider-specific by design: scoped Codex homes exclude ambient Pi sessions from managed-profile totals.
-        let shouldMergePiUsage = provider != .codex || scopedCodexHomePath?.isEmpty != false
+        let shouldMergePiUsage = Self.shouldMergeAmbientPiUsage(
+            provider: provider,
+            codexHomePath: scopedCodexHomePath,
+            claudeConfigRoot: claudeConfigRoot)
         await Self.refreshPricingIfAllowed(
             options: PricingRefreshOptions(
                 provider: provider,
@@ -537,6 +573,7 @@ public struct CostUsageFetcher: Sendable {
                 forceRefresh: forceRefresh,
                 allowVertexClaudeFallback: allowVertexClaudeFallback,
                 codexHomePath: codexHomePath,
+                claudeConfigRoot: claudeConfigRoot,
                 historyDays: historyDays,
                 cursorCookieHeaderOverride: cursorCookieHeaderOverride,
                 allowPricingRefresh: allowPricingRefresh,
@@ -636,7 +673,8 @@ public struct CostUsageFetcher: Sendable {
                 }
             }
             if options.includePiSessions,
-               provider == .claude || (provider == .codex && options.shouldMergePiUsage)
+               provider == .claude || provider == .codex,
+               options.shouldMergePiUsage
             {
                 let piReport = try PiSessionCostScanner.loadDailyReportCancellable(
                     provider: provider,

@@ -1579,3 +1579,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Masquer les hôtes inaccessibles";
 "agent_sessions_hide_unreachable_subtitle" = "Masquer les hôtes lorsque la récupération de leurs sessions échoue.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Hier";
+"All days" = "Tous les jours";
+"Previous day" = "Jour précédent";
+"Next day" = "Jour suivant";

@@ -1581,3 +1581,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Скрывать недоступные узлы";
 "agent_sessions_hide_unreachable_subtitle" = "Скрывать узлы, если не удалось получить их сеансы.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Вчера";
+"All days" = "Все дни";
+"Previous day" = "Предыдущий день";
+"Next day" = "Следующий день";

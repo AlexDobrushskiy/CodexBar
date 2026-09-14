@@ -1584,3 +1584,9 @@
 
 "agent_sessions_hide_unreachable_title" = "پنهان کردن میزبان‌های در دسترس نبودنی";
 "agent_sessions_hide_unreachable_subtitle" = "میزبان‌ها را در صورت ناموفق بودن دریافت نشست‌هایشان پنهان کنید.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "دیروز";
+"All days" = "همه روزها";
+"Previous day" = "روز قبل";
+"Next day" = "روز بعد";

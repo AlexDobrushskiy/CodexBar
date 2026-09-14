@@ -1583,3 +1583,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Sembunyikan host yang tidak terjangkau";
 "agent_sessions_hide_unreachable_subtitle" = "Sembunyikan host saat pengambilan sesinya gagal.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Kemarin";
+"All days" = "Semua hari";
+"Previous day" = "Hari sebelumnya";
+"Next day" = "Hari berikutnya";

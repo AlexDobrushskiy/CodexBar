@@ -1579,3 +1579,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Onbereikbare hosts verbergen";
 "agent_sessions_hide_unreachable_subtitle" = "Verberg hosts wanneer het ophalen van hun sessies mislukt.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Gisteren";
+"All days" = "Alle dagen";
+"Previous day" = "Vorige dag";
+"Next day" = "Volgende dag";

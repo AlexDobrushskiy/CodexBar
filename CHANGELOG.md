@@ -2,6 +2,9 @@
 
 ## 0.60.3 — Unreleased
 
+### Added
+- Claude: scan extra `CLAUDE_CONFIG_DIR` homes as separate local cost ledgers via `providers[].claudeProfileHomePaths` — each profile gets its own Usage & Spend row, `codexbar cost` section/JSON payload (`profileHome`), and `serve` `/cost` entry, with an isolated cache and no ambient/pi double counting.
+
 ## 0.60.2 — 2026-09-14
 
 ### Highlights

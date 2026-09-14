@@ -1579,3 +1579,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Agochar os hosts inaccesibles";
 "agent_sessions_hide_unreachable_subtitle" = "Agocha os hosts cando falla a consulta das súas sesións.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Onte";
+"All days" = "Todos os días";
+"Previous day" = "Día anterior";
+"Next day" = "Día seguinte";

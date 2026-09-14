@@ -1580,3 +1580,9 @@
 
 "agent_sessions_hide_unreachable_title" = "接続できないホストを非表示";
 "agent_sessions_hide_unreachable_subtitle" = "セッションの取得に失敗したホストを非表示にします。";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "昨日";
+"All days" = "すべての日";
+"Previous day" = "前の日";
+"Next day" = "次の日";

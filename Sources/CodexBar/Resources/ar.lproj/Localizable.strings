@@ -1584,3 +1584,9 @@
 
 "agent_sessions_hide_unreachable_title" = "إخفاء المضيفين غير المتاحين";
 "agent_sessions_hide_unreachable_subtitle" = "إخفاء المضيفين عند تعذّر جلب جلساتهم.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "أمس";
+"All days" = "كل الأيام";
+"Previous day" = "اليوم السابق";
+"Next day" = "اليوم التالي";

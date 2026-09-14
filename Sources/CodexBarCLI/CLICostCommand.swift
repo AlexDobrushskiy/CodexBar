@@ -123,6 +123,23 @@ extension CodexBarCLI {
             }
         }
 
+        // Provider-specific by design: Claude profile homes are extra CLAUDE_CONFIG_DIR roots, each its own ledger.
+        if providers.contains(.claude) {
+            await Self.appendClaudeProfileCost(
+                config: config,
+                context: ClaudeProfileCostRenderContext(
+                    format: format,
+                    forceRefresh: forceRefresh,
+                    includeBreakdown: includeBreakdown,
+                    useColor: useColor,
+                    historyDays: historyDays,
+                    calendar: bucketCalendar,
+                    jsonOnly: output.jsonOnly),
+                sections: &sections,
+                payload: &payload,
+                exitCode: &exitCode)
+        }
+
         if format == .json,
            let openCodex = Self.loadOpenCodexCostPayload(
                historyDays: historyDays,
@@ -165,9 +182,11 @@ extension CodexBarCLI {
         groupBy: CostGroupBy = .none,
         useColor: Bool,
         calendar: Calendar = .current,
-        includeBreakdown: Bool = false) -> String
+        includeBreakdown: Bool = false,
+        profileLabel: String? = nil) -> String
     {
-        let name = ProviderDescriptorRegistry.descriptor(for: provider).metadata.displayName
+        let providerName = ProviderDescriptorRegistry.descriptor(for: provider).metadata.displayName
+        let name = profileLabel.map { "\(providerName) (\($0))" } ?? providerName
         // Provider-specific by design: Antigravity exposes token history, not priced estimates.
         if provider == .antigravity {
             return Self.renderLocalTokenHistoryText(name: name, snapshot: snapshot, useColor: useColor)
@@ -579,7 +598,8 @@ extension CodexBarCLI {
         provider: UsageProvider,
         snapshot: CostUsageTokenSnapshot?,
         error: Error?,
-        calendar: Calendar = .current) -> CostPayload
+        calendar: Calendar = .current,
+        profileHome: String? = nil) -> CostPayload
     {
         let daily = snapshot?.daily.map(Self.costDailyPayload(from:)) ?? []
         let summary = snapshot.map { $0.summary(forLastDays: $0.historyDays, calendar: calendar) }
@@ -622,7 +642,99 @@ extension CodexBarCLI {
             totals: snapshot.flatMap(Self.costTotals(from:)),
             provenance: summary?.provenance.rawValue,
             coverage: summary?.coverage,
-            error: error.map { Self.makeErrorPayload($0) })
+            error: error.map { Self.makeErrorPayload($0) },
+            profileHome: profileHome)
+    }
+
+    // MARK: - Claude profile homes
+
+    struct ClaudeProfileCostRenderContext {
+        let format: OutputFormat
+        let forceRefresh: Bool
+        let includeBreakdown: Bool
+        let useColor: Bool
+        let historyDays: Int
+        let calendar: Calendar
+        let jsonOnly: Bool
+    }
+
+    /// Renders one cost section or JSON payload per configured Claude profile home.
+    static func appendClaudeProfileCost(
+        config: CodexBarConfig,
+        context: ClaudeProfileCostRenderContext,
+        sections: inout [String],
+        payload: inout [CostPayload],
+        exitCode: inout ExitCode) async
+    {
+        for home in self.claudeProfileHomes(config: config) {
+            do {
+                let snapshot = try await Self.loadClaudeProfileCostSnapshot(
+                    home: home,
+                    calendar: context.calendar,
+                    forceRefresh: context.forceRefresh,
+                    historyDays: context.historyDays,
+                    refreshPricingInBackground: false)
+                switch context.format {
+                case .text:
+                    sections.append(Self.renderCostText(
+                        // Provider-specific by design: profile sections keep Claude's renderer and hint text.
+                        provider: .claude,
+                        snapshot: snapshot,
+                        useColor: context.useColor,
+                        calendar: context.calendar,
+                        includeBreakdown: context.includeBreakdown,
+                        profileLabel: home.displayLabel))
+                case .json:
+                    payload.append(Self.makeCostPayload(
+                        provider: .claude,
+                        snapshot: snapshot,
+                        error: nil,
+                        calendar: context.calendar,
+                        profileHome: home.displayLabel))
+                }
+            } catch {
+                exitCode = mapError(error)
+                if context.format == .json {
+                    payload.append(self.makeCostPayload(
+                        // Provider-specific by design: profile error rows keep Claude's provider id.
+                        provider: .claude,
+                        snapshot: nil,
+                        error: error,
+                        profileHome: home.displayLabel))
+                } else if !context.jsonOnly {
+                    writeStderr("Error (\(home.displayLabel)): \(error.localizedDescription)\n")
+                }
+            }
+        }
+    }
+
+    /// Configured `providers[].claudeProfileHomePaths` that currently hold a `projects/` transcript store.
+    static func claudeProfileHomes(config: CodexBarConfig) -> [ClaudeProfileHome] {
+        // Provider-specific by design: profile homes are a Claude config extension.
+        ClaudeProfileHomes.resolve(
+            paths: config.providerConfig(for: UsageProvider.claude.instanceID)?.claudeProfileHomePaths)
+    }
+
+    /// Scans one Claude profile home as an isolated local ledger (own cache root, no ambient Pi merge).
+    static func loadClaudeProfileCostSnapshot(
+        home: ClaudeProfileHome,
+        calendar: Calendar,
+        forceRefresh: Bool,
+        historyDays: Int,
+        refreshPricingInBackground: Bool) async throws -> CostUsageTokenSnapshot
+    {
+        try await CostUsageFetcher(cacheRoot: ClaudeProfileHomes.cacheRoot(for: home), calendar: calendar)
+            .loadTokenSnapshot(
+                // Provider-specific by design: Claude profile homes scope the transcript scan by CLAUDE_CONFIG_DIR.
+                provider: .claude,
+                environment: ClaudeProfileHomes.scopedEnvironment(
+                    base: ProcessInfo.processInfo.environment,
+                    configRoot: home.path),
+                forceRefresh: forceRefresh,
+                claudeConfigRoot: home.path,
+                historyDays: historyDays,
+                refreshPricingInBackground: refreshPricingInBackground,
+                includePiSessions: false)
     }
 
     static func makeOpenCodexCostPayload(
@@ -927,6 +1039,9 @@ struct CostPayload: Encodable, Sendable {
     let provenance: String?
     let coverage: CostUsageCoverageCounts?
     let error: ProviderErrorPayload?
+    /// Display label of the Claude profile home (`~/.claude-work`) this payload covers; absent for the
+    /// provider's ambient ledger.
+    let profileHome: String?
 
     init(
         provider: String,
@@ -945,7 +1060,8 @@ struct CostPayload: Encodable, Sendable {
         totals: CostTotalsPayload?,
         provenance: String? = nil,
         coverage: CostUsageCoverageCounts? = nil,
-        error: ProviderErrorPayload?)
+        error: ProviderErrorPayload?,
+        profileHome: String? = nil)
     {
         self.provider = provider
         self.source = source
@@ -964,6 +1080,7 @@ struct CostPayload: Encodable, Sendable {
         self.provenance = provenance
         self.coverage = coverage
         self.error = error
+        self.profileHome = profileHome
     }
 }
 

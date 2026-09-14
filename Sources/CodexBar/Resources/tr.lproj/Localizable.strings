@@ -1582,3 +1582,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Erişilemeyen ana bilgisayarları gizle";
 "agent_sessions_hide_unreachable_subtitle" = "Oturumları alınamadığında ana bilgisayarları gizle.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Dün";
+"All days" = "Tüm günler";
+"Previous day" = "Önceki gün";
+"Next day" = "Sonraki gün";

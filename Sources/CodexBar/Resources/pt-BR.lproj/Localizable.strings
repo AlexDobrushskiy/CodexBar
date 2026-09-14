@@ -1580,3 +1580,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Ocultar hosts inacessíveis";
 "agent_sessions_hide_unreachable_subtitle" = "Oculta hosts quando a consulta de suas sessões falha.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Ontem";
+"All days" = "Todos os dias";
+"Previous day" = "Dia anterior";
+"Next day" = "Próximo dia";

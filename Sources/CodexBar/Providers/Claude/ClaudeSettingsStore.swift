@@ -63,6 +63,13 @@ extension SettingsStore {
         }
     }
 
+    /// Normalized `providers[].claudeProfileHomePaths`: extra CLAUDE_CONFIG_DIR roots scanned as separate
+    /// local cost ledgers. Config-file only (no UI), machine-local, never synced.
+    var claudeProfileHomePaths: [String] {
+        ClaudeProfileHomes.normalizedHomePaths(
+            self.configSnapshot.providerConfig(for: .claude)?.claudeProfileHomePaths)
+    }
+
     var claudeSwapExecutablePath: String {
         get { self.configSnapshot.providerConfig(for: .claude)?.sanitizedClaudeSwapExecutablePath ?? "" }
         set {

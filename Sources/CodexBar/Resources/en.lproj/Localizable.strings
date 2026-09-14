@@ -1582,3 +1582,9 @@
 "Color Pace Indicator" = "Color Pace Indicator";
 "Green pace indicator when behind pace, red when ahead of pace (risk of running out early)" = "Green pace indicator when behind pace, red when ahead of pace (risk of running out early)";
 "%@ weekly" = "%@ weekly";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Yesterday";
+"All days" = "All days";
+"Previous day" = "Previous day";
+"Next day" = "Next day";

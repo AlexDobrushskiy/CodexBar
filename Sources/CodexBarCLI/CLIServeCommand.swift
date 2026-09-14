@@ -1471,7 +1471,7 @@ extension CodexBarCLI {
         }
 
         let fetcher = CostUsageFetcher()
-        let payload = await Self.collectConfiguredCostPayloads(
+        var payload = await Self.collectConfiguredCostPayloads(
             providers: providers,
             config: context.config,
             context: context.collection)
@@ -1487,8 +1487,63 @@ extension CodexBarCLI {
                 return Self.makeCostPayload(provider: provider, snapshot: nil, error: error)
             }
         }
+        // Provider-specific by design: Claude profile homes add rows beyond the one-per-provider scan.
+        if providers.contains(.claude) {
+            payload += await Self.serveCollectClaudeProfileCostPayloads(
+                config: context.config,
+                context: context.collection)
+        }
 
         return Self.serveJSON(payload)
+    }
+
+    /// Provider-specific by design: Claude profile homes ride the same per-row deadline and
+    /// coordinator as provider rows, keyed by profile identity so concurrent requests share one scan.
+    static func serveCollectClaudeProfileCostPayloads(
+        config: CodexBarConfig,
+        context: ServeCostCollectionContext) async -> [CostPayload]
+    {
+        var payload: [CostPayload] = []
+        for home in Self.claudeProfileHomes(config: config) {
+            let deadline = Self.serveCostProviderDeadline(
+                startedAt: context.now(),
+                providerTimeout: context.providerTimeout,
+                requestDeadline: context.requestDeadline)
+            let timeout = Self.makeCostPayload(
+                provider: .claude,
+                snapshot: nil,
+                error: CLIServeCostTimeoutError(provider: .claude),
+                profileHome: home.displayLabel)
+            let item = await context.providerOperations.value(
+                for: "claude-profile:\(home.cacheIdentity)",
+                fingerprint: context.configFingerprint,
+                deadline: deadline,
+                timeoutValue: timeout)
+            {
+                do {
+                    let snapshot = try await Self.loadClaudeProfileCostSnapshot(
+                        home: home,
+                        calendar: .current,
+                        forceRefresh: false,
+                        historyDays: 30,
+                        refreshPricingInBackground: Self.serveCostRefreshesPricingInBackground)
+                    // Provider-specific by design: profile payloads keep Claude's provider id and add profileHome.
+                    return Self.makeCostPayload(
+                        provider: .claude,
+                        snapshot: snapshot,
+                        error: nil,
+                        profileHome: home.displayLabel)
+                } catch {
+                    return Self.makeCostPayload(
+                        provider: .claude,
+                        snapshot: nil,
+                        error: error,
+                        profileHome: home.displayLabel)
+                }
+            }
+            payload.append(item)
+        }
+        return payload
     }
 
     static func collectConfiguredCostPayloads(

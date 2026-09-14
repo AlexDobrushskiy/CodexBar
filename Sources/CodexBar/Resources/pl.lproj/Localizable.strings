@@ -1583,3 +1583,9 @@
 
 "agent_sessions_hide_unreachable_title" = "Ukryj nieosiągalne hosty";
 "agent_sessions_hide_unreachable_subtitle" = "Ukryj hosty, gdy pobieranie ich sesji się nie powiedzie.";
+
+/* Usage & Spend day stepper */
+"Yesterday" = "Wczoraj";
+"All days" = "Wszystkie dni";
+"Previous day" = "Poprzedni dzień";
+"Next day" = "Następny dzień";
