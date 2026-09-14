@@ -155,8 +155,9 @@ struct MenuBarLayoutResetText: Hashable {
     let absolute: String?
 
     init(window: MenuBarLayoutRenderWindow?, provider: UsageProvider, now: Date) {
-        let fallback = ProviderDescriptorRegistry.descriptor(for: provider).metadata.usesDetailBackedWindow
-            ? nil : window?.resetDescription
+        let metadata = ProviderDescriptorRegistry.descriptor(for: provider).metadata
+        // Balance-only providers keep their documented legacy reset-token balance aliases.
+        let fallback = metadata.usesDetailBackedWindow && !metadata.balanceOnly ? nil : window?.resetDescription
         self.countdown = window?.resetsAt
             .map { UsageFormatter.resetCountdownDescription(from: $0, now: now) } ?? fallback
         self.absolute = window?.resetsAt.map { UsageFormatter.resetDescription(from: $0, now: now) } ?? fallback

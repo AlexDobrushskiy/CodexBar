@@ -173,15 +173,16 @@ struct PerplexityCreditPercentTests {
     @Test
     func `reset descriptions remain available only when they describe timing`() {
         let date = self.now.addingTimeInterval(7200)
-        for provider in [UsageProvider.perplexity, .warp, .codex] {
+        for provider in [UsageProvider.perplexity, .warp, .codex, .deepseek] {
             for hasDate in [false, true] {
+                let description = provider == .deepseek ? "¥2.23" : "tomorrow"
                 let window = MenuBarLayoutRenderWindow(RateWindow(
                     usedPercent: 25,
                     windowMinutes: nil,
                     resetsAt: hasDate ? date : nil,
-                    resetDescription: "tomorrow"))
+                    resetDescription: description))
                 let text = MenuBarLayoutResetText(window: window, provider: provider, now: self.now)
-                let fallback: String? = provider == .codex ? "tomorrow" : nil
+                let fallback: String? = [.codex, .deepseek].contains(provider) ? description : nil
                 #expect(text.countdown == (hasDate ? "in 2h" : fallback))
                 #expect(text
                     .absolute == (hasDate ? UsageFormatter.resetDescription(from: date, now: self.now) : fallback))
