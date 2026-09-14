@@ -61,6 +61,10 @@ public enum PerplexityProviderDescriptor {
                     let windows = context.snapshot.orderedPerplexityDisplayWindows()
                     return ProviderUsageWindowPair(primary: windows.first, secondary: windows.dropFirst().first)
                 },
+                semanticWindowResolver: { snapshot in
+                    ProviderSemanticWindows(session: snapshot.primary, weekly: snapshot.secondary)
+                },
+                menuBarLayoutSecondaryLabel: "Bonus credits",
                 requestedMenuBarLaneOrders: [
                     .primary: [.primary, .secondary, .tertiary],
                     .secondary: [.secondary, .tertiary, .primary],
