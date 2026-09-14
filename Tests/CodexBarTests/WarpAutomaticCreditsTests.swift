@@ -63,6 +63,16 @@ struct WarpAutomaticCreditsTests {
             cost30d: nil,
             metrics: .unavailable)
         for showUsed in [false, true] {
+            let expectedSwitcher = showUsed ? 100 - remaining : remaining
+            let switcher = try #require(StatusItemController.switcherWeeklyMetricPercent(
+                for: .warp, snapshot: snapshot, showUsed: showUsed))
+            #expect(abs(switcher - expectedSwitcher) < 0.001)
+            for preference in [MenuBarMetricPreference.primary, .secondary] {
+                let explicitSwitcher = StatusItemController.switcherWeeklyMetricPercent(
+                    for: .warp, snapshot: snapshot, showUsed: showUsed, preference: preference)
+                #expect(explicitSwitcher ==
+                    (showUsed ? snapshot.primary?.usedPercent : snapshot.primary?.remainingPercent))
+            }
             let output = MenuBarLayoutRenderer().render(
                 layout: MenuBarLayout(lines: [[.percent(window: .automatic)]]),
                 data: data,

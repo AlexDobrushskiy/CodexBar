@@ -49,6 +49,7 @@ public enum WarpProviderDescriptor {
                 },
                 menuBarLayoutSecondaryLabel: "Add-on credits",
                 automaticSelectionPrioritizesExhaustedWindow: false,
+                switcherUsesAutomaticMenuBarWindow: true,
                 menuBarWindowResolver: { context in
                     guard context.metric == .automatic else { return .unhandled }
                     // Warp consumes monthly credits first, then available add-on credits.
