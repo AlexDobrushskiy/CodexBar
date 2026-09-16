@@ -20,7 +20,11 @@ struct BedrockProviderImplementation: ProviderImplementation {
 
     @MainActor
     func isAvailable(context: ProviderAvailabilityContext) -> Bool {
-        BedrockSettingsReader.hasCredentials(environment: context.environment)
+        if BedrockSettingsReader.hasCredentials(environment: context.environment) { return true }
+        // The local cost ledger is read from Claude Code transcripts and needs no AWS credentials:
+        // Claude Code can authenticate with AWS_BEARER_TOKEN_BEDROCK, which never reaches CodexBar.
+        // Availability is cached behind a TTL, so this bounded probe runs rarely.
+        return BedrockLocalLedgerProbe.hasLocalBedrockUsage(environment: context.environment)
     }
 
     @MainActor

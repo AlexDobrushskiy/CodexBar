@@ -369,8 +369,45 @@ public struct CostUsageFetcher: Sendable {
 
     private static let establishedEmptyCodexDailyReport = CostUsageDailyReport(data: [], summary: nil)
 
+    /// Providers whose remote ledger is optional because a local Claude-transcript ledger exists.
+    ///
+    /// Provider-specific by design: Bedrock's AWS reads are an optional overlay over a ledger that is
+    /// derived from local transcripts, so only Bedrock names itself here.
+    static func fallsBackToLocalTranscriptLedger(_ provider: UsageProvider) -> Bool {
+        provider == .bedrock
+    }
+
+    /// Tries the provider's remote ledger, surfacing a failure the caller may still recover from.
+    ///
+    /// Provider-specific by design: Cursor may fall back to local CSV when its remote dashboard is
+    /// unavailable, and Bedrock falls back to its local transcript ledger; every other provider's
+    /// remote failure is fatal here.
+    private static func attemptRemoteTokenSnapshot(
+        provider: UsageProvider,
+        environment: [String: String],
+        now: Date,
+        historyDays: Int,
+        cursorCookieHeaderOverride: String?) async throws
+        -> (snapshot: CostUsageTokenSnapshot?, error: Error?)
+    {
+        do {
+            let snapshot = try await self.loadRemoteTokenSnapshot(
+                provider: provider,
+                environment: environment,
+                now: now,
+                historyDays: historyDays,
+                cursorCookieHeaderOverride: cursorCookieHeaderOverride)
+            return (snapshot, nil)
+        } catch {
+            if provider != .cursor, !self.fallsBackToLocalTranscriptLedger(provider) {
+                throw error
+            }
+            return (nil, error)
+        }
+    }
+
     /// Provider-specific by design: scoped Codex homes and Claude profile homes exclude ambient Pi sessions
-    /// from their per-profile totals; ambient scans keep merging them.
+    /// from their per-profile totals, and the Bedrock ledger never owns them; ambient scans keep merging them.
     private static func shouldMergeAmbientPiUsage(
         provider: UsageProvider,
         codexHomePath: String?,
@@ -379,6 +416,7 @@ public struct CostUsageFetcher: Sendable {
         switch provider {
         case .codex: codexHomePath?.isEmpty != false
         case .claude: claudeConfigRoot?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        case .bedrock: false
         default: true
         }
     }
@@ -439,25 +477,16 @@ public struct CostUsageFetcher: Sendable {
 
         let clampedHistoryDays = max(1, min(365, historyDays))
 
-        var remoteSnapshot: CostUsageTokenSnapshot?
-        var remoteError: Error?
-        // Provider-specific by design: Cursor may fall back to local CSV when its remote dashboard is unavailable.
-        do {
-            remoteSnapshot = try await self.loadRemoteTokenSnapshot(
-                provider: provider,
-                environment: environment,
-                now: now,
-                historyDays: clampedHistoryDays,
-                cursorCookieHeaderOverride: cursorCookieHeaderOverride)
-        } catch {
-            if provider != .cursor {
-                throw error
-            }
-            remoteError = error
+        let remote = try await Self.attemptRemoteTokenSnapshot(
+            provider: provider,
+            environment: environment,
+            now: now,
+            historyDays: clampedHistoryDays,
+            cursorCookieHeaderOverride: cursorCookieHeaderOverride)
+        if let snapshot = remote.snapshot {
+            return snapshot
         }
-        if let remoteSnapshot {
-            return remoteSnapshot
-        }
+        var remoteError = remote.error
 
         // Provider-specific by design: Cursor and Antigravity local readers backfill providers without remote history.
         let fallbackCalendar = Self.resolvedScannerOptions(
@@ -500,6 +529,13 @@ public struct CostUsageFetcher: Sendable {
                 historyDays: clampedHistoryDays,
                 calendar: fallbackCalendar,
                 historyCoverageIsEstablished: false)
+        }
+        // Provider-specific by design: Bedrock's CloudWatch/Cost Explorer reads are an optional
+        // vendor-metered overlay. Claude Code can reach Bedrock with AWS_BEARER_TOKEN_BEDROCK, which
+        // CodexBar never sees, and those AWS reads bill per request — so a missing or failing remote
+        // must not suppress the local transcript ledger, which needs no AWS access at all.
+        if Self.fallsBackToLocalTranscriptLedger(provider) {
+            remoteError = nil
         }
         if let remoteError {
             throw remoteError
@@ -1425,8 +1461,11 @@ public struct CostUsageFetcher: Sendable {
     {
         if provider == .vertexai {
             options.claudeLogProviderFilter = allowVertexClaudeFallback ? .all : .vertexAIOnly
+        } else if provider == .bedrock {
+            options.claudeLogProviderFilter = .bedrockOnly
         } else if provider == .claude {
-            options.claudeLogProviderFilter = .excludeVertexAI
+            // Anthropic first-party only: Vertex and Bedrock each own their ledger.
+            options.claudeLogProviderFilter = .firstPartyOnly
         }
         if forceRefresh || bypassScannerDebounce {
             options.refreshMinIntervalSeconds = 0

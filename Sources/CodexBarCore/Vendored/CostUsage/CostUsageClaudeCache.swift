@@ -305,7 +305,7 @@ struct CostUsageClaudeCache: Codable {
     }
 }
 
-/// Claude and Vertex retain their small transcript cache. Codex deliberately has no route
+/// Claude, Vertex and Bedrock retain their small transcript cache. Codex deliberately has no route
 /// through this JSON I/O boundary; its only persistence authority is `CostUsageStore`.
 enum CostUsageClaudeCacheIO {
     private static func defaultCacheRoot() -> URL {
@@ -317,7 +317,7 @@ enum CostUsageClaudeCacheIO {
     // migration (see #2760).
 
     static func cacheFileURL(provider: UsageProvider, cacheRoot: URL? = nil) -> URL {
-        precondition(provider == .claude || provider == .vertexai)
+        precondition(provider == .claude || provider == .vertexai || provider == .bedrock)
         let root = cacheRoot ?? self.defaultCacheRoot()
         return root
             .appendingPathComponent("cost-usage", isDirectory: true)

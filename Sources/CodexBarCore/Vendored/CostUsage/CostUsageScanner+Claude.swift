@@ -371,14 +371,71 @@ extension CostUsageScanner {
         message: ClaudeJSONObject?,
         filter: ClaudeLogProviderFilter) -> Bool
     {
-        switch filter {
-        case .all:
-            true
-        case .vertexAIOnly:
-            self.isVertexAIUsageEntry(obj: obj, message: message)
-        case .excludeVertexAI:
-            !self.isVertexAIUsageEntry(obj: obj, message: message)
+        filter.allows(self.claudeLogBackend(obj: obj, message: message))
+    }
+
+    /// Classifies one transcript row by the API backend that billed it.
+    ///
+    /// Vertex is tested first so its long-standing (deliberately loose) metadata rules keep their
+    /// exact historical outcome; Bedrock is only considered for rows Vertex did not claim.
+    static func claudeLogBackend(obj: ClaudeJSONObject, message: ClaudeJSONObject?) -> ClaudeLogBackend {
+        if self.isVertexAIUsageEntry(obj: obj, message: message) {
+            return .vertexAI
         }
+        // Provider-specific by design: classification must name the backend that billed the row, and
+        // Bedrock stamps markers only it produces.
+        if self.isBedrockUsageEntry(obj: obj, message: message) {
+            return .bedrock
+        }
+        return .firstParty
+    }
+
+    static func isBedrockUsageEntry(obj: Any) -> Bool {
+        guard let obj = ClaudeJSONObject(obj) else { return false }
+        return self.isBedrockUsageEntry(obj: obj)
+    }
+
+    static func isBedrockUsageEntry(obj: ClaudeJSONObject) -> Bool {
+        self.isBedrockUsageEntry(obj: obj, message: obj.dictionary("message"))
+    }
+
+    /// Detects Bedrock-billed rows.
+    ///
+    /// Unlike the Vertex classifier this deliberately does NOT walk arbitrary metadata or message
+    /// text. "bedrock" is an ordinary English word that appears in transcript prose, so a recursive
+    /// text match would misclassify any session that merely discusses Bedrock. Only the two markers
+    /// the Bedrock API itself stamps are trusted: the `_bdrk_` identifier infix and the
+    /// `anthropic.claude-*` model-id namespace (optionally region- or ARN-qualified).
+    private static func isBedrockUsageEntry(obj: ClaudeJSONObject, message: ClaudeJSONObject?) -> Bool {
+        // Primary detection: Bedrock message ids and request ids carry a "bdrk" infix,
+        // e.g. "msg_bdrk_dmkwtqyoytda5f2q3lvl52jqh6ryynodcgeiogncotpl66xatrra".
+        if let messageId = message?["id"] as? String,
+           messageId.contains("_bdrk_")
+        {
+            return true
+        }
+        if let requestId = obj["requestId"] as? String,
+           requestId.contains("_bdrk_")
+        {
+            return true
+        }
+
+        // Secondary detection: Bedrock-native model ids namespace the vendor and may carry a
+        // region prefix or a full inference-profile ARN, e.g.
+        // "anthropic.claude-haiku-4-5-20251001-v1:0", "us.anthropic.claude-opus-4-5-v1:0".
+        // First-party ids are bare ("claude-opus-5") and Vertex uses an "@" version separator.
+        if let model = message?["model"] as? String,
+           Self.modelNameLooksBedrock(model)
+        {
+            return true
+        }
+
+        return false
+    }
+
+    /// Detects Bedrock model ids by their `anthropic.` vendor namespace.
+    static func modelNameLooksBedrock(_ model: String) -> Bool {
+        model.lowercased().contains("anthropic.claude")
     }
 
     static func isVertexAIUsageEntry(obj: Any) -> Bool {
@@ -777,14 +834,9 @@ extension CostUsageScanner {
         artifactStamps: (cache: CostUsageClaudeFileStamp?, pricing: CostUsageClaudeFileStamp?))
         -> CostUsageClaudeReportMemoKey
     {
-        let providerFilterKey = switch providerFilter {
-        case .all: "all"
-        case .vertexAIOnly: "vertex-ai-only"
-        case .excludeVertexAI: "exclude-vertex-ai"
-        }
-        return CostUsageClaudeReportMemoKey(
+        CostUsageClaudeReportMemoKey(
             provider: provider,
-            providerFilter: providerFilterKey,
+            providerFilter: providerFilter.cacheKey,
             sinceKey: range.sinceKey,
             untilKey: range.untilKey,
             scanSinceKey: range.scanSinceKey,

@@ -70,7 +70,8 @@ public enum BedrockProviderDescriptor {
             cli: ProviderCLIConfig(
                 name: "bedrock",
                 aliases: ["aws-bedrock"],
-                versionDetector: nil))
+                versionDetector: nil,
+                supportsCostCommand: true))
     }
 
     private static func applyCredentialConfig(

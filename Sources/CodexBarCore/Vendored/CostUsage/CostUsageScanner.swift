@@ -47,10 +47,58 @@ enum CostUsageScanner {
         }
     }
 
-    enum ClaudeLogProviderFilter {
-        case all
-        case vertexAIOnly
-        case excludeVertexAI
+    /// Which API backend an entry was billed against, classified per transcript row.
+    ///
+    /// The transcript directory is only a proxy for the backend — one `CLAUDE_CONFIG_DIR` can hold
+    /// rows from several backends when the user switches mid-session. The row itself is authoritative.
+    ///
+    /// Provider-specific by design: these cases name the backends the Claude log format can carry,
+    /// not a dispatch over `UsageProvider`.
+    enum ClaudeLogBackend: CaseIterable, Sendable {
+        /// Anthropic first-party (subscription or direct API).
+        case firstParty
+        case vertexAI
+        case bedrock
+
+        /// Stable token used to build report-memo keys.
+        var cacheKey: String {
+            switch self {
+            case .firstParty: "first-party"
+            case .vertexAI: "vertex-ai"
+            case .bedrock: "bedrock"
+            }
+        }
+    }
+
+    /// Backend allow-list applied to Claude transcript rows during a scan.
+    ///
+    /// A set rather than a single case: the Claude provider ledger must exclude Vertex *and* Bedrock
+    /// at once, so the filter cannot be one "exclude X" choice.
+    /// Provider-specific by design: each named filter is one ledger's backend allow-list over the
+    /// Claude log format; the backend names are the format's own, not a dispatch over `UsageProvider`.
+    struct ClaudeLogProviderFilter: Equatable, Sendable {
+        var allowed: Set<ClaudeLogBackend>
+
+        init(allowed: Set<ClaudeLogBackend>) {
+            self.allowed = allowed
+        }
+
+        func allows(_ backend: ClaudeLogBackend) -> Bool {
+            self.allowed.contains(backend)
+        }
+
+        static let all = Self(allowed: Set(ClaudeLogBackend.allCases))
+        static let vertexAIOnly = Self(allowed: [.vertexAI])
+        static let bedrockOnly = Self(allowed: [.bedrock])
+        /// Everything that is not Vertex. Retained for callers that predate Bedrock classification.
+        static let excludeVertexAI = Self(allowed: [.firstParty, .bedrock])
+        /// Anthropic first-party only — the Claude provider ledger.
+        static let firstPartyOnly = Self(allowed: [.firstParty])
+
+        /// Stable key for report memoization; sorted so one set always yields one string.
+        var cacheKey: String {
+            self.allowed.map(\.cacheKey).sorted().joined(separator: "+")
+        }
     }
 
     struct CodexScanWorkMetrics: Equatable, Sendable {
@@ -2014,6 +2062,19 @@ enum CostUsageScanner {
             }
             return try self.loadClaudeDaily(
                 provider: .vertexai,
+                range: range,
+                now: now,
+                options: filtered,
+                checkCancellation: checkCancellation)
+        case .bedrock:
+            // Bedrock-billed Claude Code traffic lands in the same transcripts as first-party
+            // traffic; the row's own backend marker separates the ledgers, not the config root.
+            var filtered = options
+            if filtered.claudeLogProviderFilter == .all {
+                filtered.claudeLogProviderFilter = .bedrockOnly
+            }
+            return try self.loadClaudeDaily(
+                provider: .bedrock,
                 range: range,
                 now: now,
                 options: filtered,
