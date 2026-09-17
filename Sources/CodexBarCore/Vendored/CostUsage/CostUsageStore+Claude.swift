@@ -296,4 +296,55 @@ extension CostUsageStore {
             return rows
         }
     }
+
+    /// Total tokens per working directory per backend, over reconciled events.
+    ///
+    /// The question the day×model JSON artifact structurally could not answer.
+    func readClaudeTokenTotalsByProject() -> [String: [String: Int]] {
+        self.withDatabase(default: [:]) { database in
+            let statement = try Self.prepare(database, """
+            SELECT cwd, backend,
+                   SUM(input + cache_read + cache_create + output) AS tokens
+            FROM claude_reconciled_events
+            WHERE cwd IS NOT NULL
+            GROUP BY cwd, backend
+            """)
+            defer { sqlite3_finalize(statement) }
+            var totals: [String: [String: Int]] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let cwd = Self.columnText(statement, at: 0),
+                      let backend = Self.columnText(statement, at: 1)
+                else { continue }
+                totals[cwd, default: [:]][backend] = Int(sqlite3_column_int64(statement, 2))
+            }
+            return totals
+        }
+    }
+}
+
+// MARK: - Synchronous bridge for the scanner
+
+extension CostUsageStore {
+    /// Mirrors one scanned transcript and its rows into the store.
+    ///
+    /// The Claude scan is synchronous, so it reaches the store through the shared executor the way
+    /// the Codex scan does. Events are *replaced* rather than appended because `rows` is already the
+    /// merged full set for the file, so a shrinking or rewritten transcript cannot leave stale rows.
+    nonisolated func syncReplaceClaudeFile(
+        file: ClaudeStoreSourceFile,
+        events: [ClaudeStoreUsageEvent]) -> Bool
+    {
+        self.syncWithStoreIsolation { store in
+            guard let fileID = store.upsertClaudeSourceFile(file) else { return false }
+            return store.replaceClaudeUsageEvents(fileID: fileID, events: events)
+        }
+    }
+
+    nonisolated func syncReadClaudeSourceFiles() -> [ClaudeStoreSourceFile] {
+        self.syncWithStoreIsolation { $0.readClaudeSourceFiles() }
+    }
+
+    nonisolated func syncDeleteClaudeSourceFile(path: String) -> Bool {
+        self.syncWithStoreIsolation { $0.deleteClaudeSourceFile(path: path) }
+    }
 }

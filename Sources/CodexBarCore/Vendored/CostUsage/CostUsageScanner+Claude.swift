@@ -813,6 +813,17 @@ extension CostUsageScanner {
             nil
         }
 
+        // Only an unfiltered scan may write: a provider-scoped scan parses just the rows its filter
+        // admits, and because the mirror replaces a file's events, storing one would let a later
+        // scan for another backend swap the rows out. The store holds every backend; the ledger
+        // split is a `WHERE` clause over `backend`.
+        if shouldMutateCache, options.claudeLogProviderFilter == .all {
+            Self.mirrorClaudeCacheIntoStore(
+                cache: cache,
+                cacheRoot: options.cacheRoot,
+                calendar: range.calendar)
+        }
+
         let finalCacheArtifactStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
         let finalPricingArtifactStamp = CostUsageClaudeFileStamp.read(at: pricingURL)
         let finalReportKey = Self.claudeReportMemoKey(
@@ -1003,5 +1014,78 @@ extension CostUsageScanner {
                 totalCostUSD: costSeen ? totalCost : nil)
 
         return CostUsageDailyReport(data: entries, summary: summary)
+    }
+}
+
+extension CostUsageScanner {
+    /// Mirrors the scanned transcripts into `CostUsageStore` as per-event rows.
+    ///
+    /// The JSON artifact keeps day×model totals; the store keeps the rows those totals came from,
+    /// so usage stays answerable by project, session, branch and backend. Cross-file parent/subagent
+    /// reconciliation is deliberately NOT applied here — every candidate is stored and the winner is
+    /// chosen by `claude_reconciled_events`, so deleting a winner reveals the loser.
+    static func mirrorClaudeCacheIntoStore(
+        cache: CostUsageCache,
+        cacheRoot: URL?,
+        calendar: Calendar)
+    {
+        let store = CostUsageStore(cacheRoot: cacheRoot)
+        let tzIdentity = calendar.timeZone.identifier
+        var seen: Set<String> = []
+        for (path, usage) in cache.files {
+            seen.insert(path)
+            let rows = usage.claudeRows ?? []
+            let days = rows.map(\.dayKey).sorted()
+            let file = ClaudeStoreSourceFile(
+                path: path,
+                fileIdentity: nil,
+                size: usage.size,
+                mtimeMs: usage.mtimeUnixMs,
+                parsedOffset: usage.parsedBytes ?? 0,
+                coverageSinceDay: days.first,
+                coverageUntilDay: days.last,
+                parserRevision: Self.claudeStoreParserRevision,
+                tzIdentity: tzIdentity,
+                complete: true)
+            let events = rows.enumerated().map { index, row in
+                Self.storeEvent(row: row, rowIndex: index)
+            }
+            _ = store.syncReplaceClaudeFile(file: file, events: events)
+        }
+        for stored in store.syncReadClaudeSourceFiles() where !seen.contains(stored.path) {
+            _ = store.syncDeleteClaudeSourceFile(path: stored.path)
+        }
+    }
+
+    /// Bumped when the stored row shape changes, so a stale row set is recognisably old.
+    static let claudeStoreParserRevision = 1
+
+    private static func storeEvent(row: ClaudeUsageRow, rowIndex: Int) -> ClaudeStoreUsageEvent {
+        ClaudeStoreUsageEvent(
+            rowIndex: rowIndex,
+            timestampUnixMs: row.timestampUnixMs,
+            day: row.dayKey,
+            backend: (row.backend ?? .firstParty).rawValue,
+            model: row.model,
+            rawModel: row.rawModel ?? row.model,
+            sessionID: row.sessionId,
+            messageID: row.messageId,
+            requestID: row.requestId,
+            cwd: row.cwd,
+            gitBranch: row.gitBranch,
+            pathRole: row.pathRole == .subagent ? "subagent" : "main",
+            isSidechain: row.isSidechain,
+            effort: row.effort,
+            serviceTier: row.serviceTier,
+            input: row.input,
+            cacheRead: row.cacheRead,
+            cacheCreate: row.cacheCreate,
+            cacheCreate1h: row.cacheCreate1h ?? 0,
+            output: row.output,
+            thinkingTokens: row.thinkingTokens ?? 0,
+            webSearchRequests: row.webSearchRequests ?? 0,
+            webFetchRequests: row.webFetchRequests ?? 0,
+            ingestCostNanos: row.costNanos,
+            ingestCostPriced: row.costPriced ?? false)
     }
 }

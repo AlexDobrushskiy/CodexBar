@@ -197,7 +197,7 @@ actor CostUsageStore {
 
 extension CostUsageStore {
     /// The shared queue establishes isolation; runtime checks are unreliable for SDK-14 binaries on macOS 15.
-    private nonisolated func syncWithStoreIsolation<T: Sendable>(
+    nonisolated func syncWithStoreIsolation<T: Sendable>(
         _ operation: (isolated CostUsageStore) throws -> T) rethrows -> T
     {
         try Self.sharedExecutor.sync {
