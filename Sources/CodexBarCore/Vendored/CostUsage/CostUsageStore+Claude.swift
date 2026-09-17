@@ -83,4 +83,163 @@ extension CostUsageStore {
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         return sqlite3_column_int64(statement, 0)
     }
+
+    /// Inserts events, letting a later streaming chunk replace the stored winner.
+    ///
+    /// The parser already collapses chunks sharing one `messageId:requestId` inside a file and
+    /// keeps the last cumulative one, so an append of the same canonical identity must overwrite
+    /// every payload column *and* `row_index` — last line wins. Rows missing either id have no
+    /// canonical identity and are keyed only by `row_index`, so they never collapse together.
+    func appendClaudeUsageEvents(fileID: Int64, events: [ClaudeStoreUsageEvent]) -> Bool {
+        guard !events.isEmpty else { return true }
+        return self.withDatabase(default: false) { database in
+            for event in events {
+                try Self.upsertClaudeUsageEvent(database, fileID: fileID, event: event)
+            }
+            return true
+        }
+    }
+
+    /// Replaces every event for one file, for a full reparse or an identity change.
+    ///
+    /// Deletes before inserting so keyed rows that are no longer in the transcript cannot survive.
+    func replaceClaudeUsageEvents(fileID: Int64, events: [ClaudeStoreUsageEvent]) -> Bool {
+        self.withDatabase(default: false) { database in
+            let delete = try Self.prepare(database, "DELETE FROM claude_usage_events WHERE file_id = ?")
+            defer { sqlite3_finalize(delete) }
+            Self.bind(fileID, to: delete, at: 1)
+            try Self.stepDone(delete, database: database)
+            for event in events {
+                try Self.upsertClaudeUsageEvent(database, fileID: fileID, event: event)
+            }
+            return true
+        }
+    }
+
+    func readClaudeUsageEvents(fileID: Int64) -> [ClaudeStoreUsageEvent] {
+        self.withDatabase(default: []) { database in
+            let statement = try Self.prepare(database, """
+            SELECT row_index, ts_ms, day, backend, model, raw_model, session_id, message_id,
+                   request_id, cwd, git_branch, path_role, is_sidechain, effort, service_tier,
+                   input, cache_read, cache_create, cache_create_1h, output, thinking_tokens,
+                   web_search_reqs, web_fetch_reqs, ingest_cost_nanos, ingest_cost_priced
+            FROM claude_usage_events WHERE file_id = ? ORDER BY row_index
+            """)
+            defer { sqlite3_finalize(statement) }
+            Self.bind(fileID, to: statement, at: 1)
+            var events: [ClaudeStoreUsageEvent] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                events.append(ClaudeStoreUsageEvent(
+                    rowIndex: Int(sqlite3_column_int64(statement, 0)),
+                    timestampUnixMs: sqlite3_column_type(statement, 1) == SQLITE_NULL
+                        ? nil : sqlite3_column_int64(statement, 1),
+                    day: Self.columnText(statement, at: 2) ?? "",
+                    backend: Self.columnText(statement, at: 3) ?? "",
+                    model: Self.columnText(statement, at: 4) ?? "",
+                    rawModel: Self.columnText(statement, at: 5) ?? "",
+                    sessionID: Self.columnText(statement, at: 6),
+                    messageID: Self.columnText(statement, at: 7),
+                    requestID: Self.columnText(statement, at: 8),
+                    cwd: Self.columnText(statement, at: 9),
+                    gitBranch: Self.columnText(statement, at: 10),
+                    pathRole: Self.columnText(statement, at: 11) ?? "",
+                    isSidechain: sqlite3_column_int64(statement, 12) != 0,
+                    effort: Self.columnText(statement, at: 13),
+                    serviceTier: Self.columnText(statement, at: 14),
+                    input: Int(sqlite3_column_int64(statement, 15)),
+                    cacheRead: Int(sqlite3_column_int64(statement, 16)),
+                    cacheCreate: Int(sqlite3_column_int64(statement, 17)),
+                    cacheCreate1h: Int(sqlite3_column_int64(statement, 18)),
+                    output: Int(sqlite3_column_int64(statement, 19)),
+                    thinkingTokens: Int(sqlite3_column_int64(statement, 20)),
+                    webSearchRequests: Int(sqlite3_column_int64(statement, 21)),
+                    webFetchRequests: Int(sqlite3_column_int64(statement, 22)),
+                    ingestCostNanos: Int(sqlite3_column_int64(statement, 23)),
+                    ingestCostPriced: sqlite3_column_int64(statement, 24) != 0))
+            }
+            return events
+        }
+    }
+
+    func deleteClaudeSourceFile(path: String) -> Bool {
+        self.withDatabase(default: false) { database in
+            let statement = try Self.prepare(database, "DELETE FROM claude_source_files WHERE path = ?")
+            defer { sqlite3_finalize(statement) }
+            Self.bind(path, to: statement, at: 1)
+            try Self.stepDone(statement, database: database)
+            return true
+        }
+    }
+
+    private static func upsertClaudeUsageEvent(
+        _ database: OpaquePointer,
+        fileID: Int64,
+        event: ClaudeStoreUsageEvent) throws
+    {
+        let statement = try Self.prepare(database, """
+        INSERT INTO claude_usage_events(
+            file_id, row_index, ts_ms, day, backend, model, raw_model, session_id, message_id,
+            request_id, cwd, git_branch, path_role, is_sidechain, effort, service_tier,
+            input, cache_read, cache_create, cache_create_1h, output, thinking_tokens,
+            web_search_reqs, web_fetch_reqs, ingest_cost_nanos, ingest_cost_priced)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(file_id, backend, message_id, request_id)
+        WHERE message_id IS NOT NULL AND request_id IS NOT NULL
+        DO UPDATE SET
+            row_index = excluded.row_index,
+            ts_ms = excluded.ts_ms,
+            day = excluded.day,
+            model = excluded.model,
+            raw_model = excluded.raw_model,
+            session_id = excluded.session_id,
+            cwd = excluded.cwd,
+            git_branch = excluded.git_branch,
+            path_role = excluded.path_role,
+            is_sidechain = excluded.is_sidechain,
+            effort = excluded.effort,
+            service_tier = excluded.service_tier,
+            input = excluded.input,
+            cache_read = excluded.cache_read,
+            cache_create = excluded.cache_create,
+            cache_create_1h = excluded.cache_create_1h,
+            output = excluded.output,
+            thinking_tokens = excluded.thinking_tokens,
+            web_search_reqs = excluded.web_search_reqs,
+            web_fetch_reqs = excluded.web_fetch_reqs,
+            ingest_cost_nanos = excluded.ingest_cost_nanos,
+            ingest_cost_priced = excluded.ingest_cost_priced
+        """)
+        defer { sqlite3_finalize(statement) }
+        Self.bind(fileID, to: statement, at: 1)
+        Self.bind(Int64(event.rowIndex), to: statement, at: 2)
+        if let ts = event.timestampUnixMs {
+            Self.bind(ts, to: statement, at: 3)
+        } else {
+            sqlite3_bind_null(statement, 3)
+        }
+        Self.bind(event.day, to: statement, at: 4)
+        Self.bind(event.backend, to: statement, at: 5)
+        Self.bind(event.model, to: statement, at: 6)
+        Self.bind(event.rawModel, to: statement, at: 7)
+        Self.bind(event.sessionID, to: statement, at: 8)
+        Self.bind(event.messageID, to: statement, at: 9)
+        Self.bind(event.requestID, to: statement, at: 10)
+        Self.bind(event.cwd, to: statement, at: 11)
+        Self.bind(event.gitBranch, to: statement, at: 12)
+        Self.bind(event.pathRole, to: statement, at: 13)
+        Self.bind(event.isSidechain ? Int64(1) : Int64(0), to: statement, at: 14)
+        Self.bind(event.effort, to: statement, at: 15)
+        Self.bind(event.serviceTier, to: statement, at: 16)
+        Self.bind(Int64(event.input), to: statement, at: 17)
+        Self.bind(Int64(event.cacheRead), to: statement, at: 18)
+        Self.bind(Int64(event.cacheCreate), to: statement, at: 19)
+        Self.bind(Int64(event.cacheCreate1h), to: statement, at: 20)
+        Self.bind(Int64(event.output), to: statement, at: 21)
+        Self.bind(Int64(event.thinkingTokens), to: statement, at: 22)
+        Self.bind(Int64(event.webSearchRequests), to: statement, at: 23)
+        Self.bind(Int64(event.webFetchRequests), to: statement, at: 24)
+        Self.bind(Int64(event.ingestCostNanos), to: statement, at: 25)
+        Self.bind(event.ingestCostPriced ? Int64(1) : Int64(0), to: statement, at: 26)
+        try Self.stepDone(statement, database: database)
+    }
 }
