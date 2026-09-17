@@ -10,6 +10,20 @@ import Testing
 /// then the path sort key breaks the tie.
 @Suite(.serialized)
 struct ClaudeUsageStoreReconciliationTests {
+    /// Which side of the parent/subagent ranking a candidate sits on.
+    private enum Role {
+        case parent
+        case subagent
+
+        var pathRole: String {
+            self == .parent ? "main" : "subagent"
+        }
+
+        var isSidechain: Bool {
+            self == .subagent
+        }
+    }
+
     private static func sourceFile(path: String) -> ClaudeStoreSourceFile {
         ClaudeStoreSourceFile(
             path: path,
@@ -24,11 +38,10 @@ struct ClaudeUsageStoreReconciliationTests {
             complete: true)
     }
 
+    /// `key` names the canonical identity; nil leaves both ids null, which carries no identity.
     private static func event(
-        messageID: String?,
-        requestID: String?,
-        pathRole: String,
-        isSidechain: Bool,
+        key: String?,
+        role: Role,
         output: Int,
         rowIndex: Int = 1) -> ClaudeStoreUsageEvent
     {
@@ -40,12 +53,12 @@ struct ClaudeUsageStoreReconciliationTests {
             model: "claude-opus-5",
             rawModel: "claude-opus-5",
             sessionID: "s1",
-            messageID: messageID,
-            requestID: requestID,
+            messageID: key.map { "msg_\($0)" },
+            requestID: key.map { "req_\($0)" },
             cwd: "/p",
             gitBranch: "main",
-            pathRole: pathRole,
-            isSidechain: isSidechain,
+            pathRole: role.pathRole,
+            isSidechain: role.isSidechain,
             effort: nil,
             serviceTier: nil,
             input: 0,
@@ -62,22 +75,11 @@ struct ClaudeUsageStoreReconciliationTests {
 
     private static func row(
         _ path: String,
-        messageID: String?,
-        requestID: String?,
-        pathRole: String,
-        isSidechain: Bool,
-        output: Int,
-        rowIndex: Int = 1) -> (path: String, event: ClaudeStoreUsageEvent)
+        key: String?,
+        role: Role,
+        output: Int) -> (path: String, event: ClaudeStoreUsageEvent)
     {
-        (
-            path: path,
-            event: self.event(
-                messageID: messageID,
-                requestID: requestID,
-                pathRole: pathRole,
-                isSidechain: isSidechain,
-                output: output,
-                rowIndex: rowIndex))
+        (path: path, event: self.event(key: key, role: role, output: output))
     }
 
     private static func seed(
@@ -100,27 +102,9 @@ struct ClaudeUsageStoreReconciliationTests {
         let store = CostUsageStore(cacheRoot: env.cacheRoot)
 
         await Self.seed(store, [
-            Self.row(
-                "/p/session.jsonl",
-                messageID: "msg_overlap",
-                requestID: "req_overlap",
-                pathRole: "main",
-                isSidechain: false,
-                output: 100),
-            Self.row(
-                "/p/session/subagents/a.jsonl",
-                messageID: "msg_overlap",
-                requestID: "req_overlap",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 100),
-            Self.row(
-                "/p/session/subagents/b.jsonl",
-                messageID: "msg_unique_sidechain",
-                requestID: "req_unique_sidechain",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 55),
+            Self.row("/p/session.jsonl", key: "overlap", role: .parent, output: 100),
+            Self.row("/p/session/subagents/a.jsonl", key: "overlap", role: .subagent, output: 100),
+            Self.row("/p/session/subagents/b.jsonl", key: "unique", role: .subagent, output: 55),
         ])
 
         let reconciled = await store.readReconciledClaudeEvents()
@@ -139,20 +123,8 @@ struct ClaudeUsageStoreReconciliationTests {
         let store = CostUsageStore(cacheRoot: env.cacheRoot)
 
         await Self.seed(store, [
-            Self.row(
-                "/p/b.jsonl",
-                messageID: "msg_x",
-                requestID: "req_x",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 2),
-            Self.row(
-                "/p/a.jsonl",
-                messageID: "msg_x",
-                requestID: "req_x",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 1),
+            Self.row("/p/b.jsonl", key: "x", role: .subagent, output: 2),
+            Self.row("/p/a.jsonl", key: "x", role: .subagent, output: 1),
         ])
 
         let reconciled = await store.readReconciledClaudeEvents()
@@ -169,20 +141,8 @@ struct ClaudeUsageStoreReconciliationTests {
         let store = CostUsageStore(cacheRoot: env.cacheRoot)
 
         await Self.seed(store, [
-            Self.row(
-                "/p/session.jsonl",
-                messageID: "msg_overlap",
-                requestID: "req_overlap",
-                pathRole: "main",
-                isSidechain: false,
-                output: 100),
-            Self.row(
-                "/p/session/subagents/a.jsonl",
-                messageID: "msg_overlap",
-                requestID: "req_overlap",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 7),
+            Self.row("/p/session.jsonl", key: "overlap", role: .parent, output: 100),
+            Self.row("/p/session/subagents/a.jsonl", key: "overlap", role: .subagent, output: 7),
         ])
         #expect(await store.readReconciledClaudeEvents().first?.output == 100)
 
@@ -202,20 +162,8 @@ struct ClaudeUsageStoreReconciliationTests {
 
         let id = try #require(await store.upsertClaudeSourceFile(Self.sourceFile(path: "/p/s.jsonl")))
         #expect(await store.appendClaudeUsageEvents(fileID: id, events: [
-            Self.event(
-                messageID: nil,
-                requestID: nil,
-                pathRole: "main",
-                isSidechain: false,
-                output: 3,
-                rowIndex: 1),
-            Self.event(
-                messageID: nil,
-                requestID: nil,
-                pathRole: "main",
-                isSidechain: false,
-                output: 4,
-                rowIndex: 2),
+            Self.event(key: nil, role: .parent, output: 3, rowIndex: 1),
+            Self.event(key: nil, role: .parent, output: 4, rowIndex: 2),
         ]))
 
         let reconciled = await store.readReconciledClaudeEvents()
@@ -240,20 +188,8 @@ struct ClaudeUsageStoreReconciliationTests {
         #expect(!(decomposed < plain), "precondition: Swift ranks the decomposed path after cafz")
 
         await Self.seed(store, [
-            Self.row(
-                decomposed,
-                messageID: "msg_x",
-                requestID: "req_x",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 1),
-            Self.row(
-                plain,
-                messageID: "msg_x",
-                requestID: "req_x",
-                pathRole: "subagent",
-                isSidechain: true,
-                output: 2),
+            Self.row(decomposed, key: "x", role: .subagent, output: 1),
+            Self.row(plain, key: "x", role: .subagent, output: 2),
         ])
 
         let reconciled = await store.readReconciledClaudeEvents()
