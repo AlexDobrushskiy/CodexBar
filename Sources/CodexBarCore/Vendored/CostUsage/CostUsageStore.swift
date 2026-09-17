@@ -74,7 +74,7 @@ actor CostUsageStore {
 
     static let log = CodexBarLog.logger(LogCategories.tokenCost)
     static let databaseFilename = "cost-usage.sqlite"
-    static let baseSchemaVersion = 3
+    static let baseSchemaVersion = 4
     static let schemaVersion = CostUsageStore.combinedSchemaVersion(
         base: CostUsageStore.baseSchemaVersion,
         parserHash: CodexParserHash.value)
@@ -177,6 +177,11 @@ actor CostUsageStore {
         self.expectedSchemaVersion = schemaVersion
         self.expectedParserHash = parserHash
         self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
+    }
+
+    /// Base schema version packed into a combined stamp by `combinedSchemaVersion`.
+    static func baseVersion(of combined: Int64) -> Int {
+        Int((combined >> 24) & 0x7F)
     }
 
     static func combinedSchemaVersion(base: Int, parserHash: String) -> Int32 {
@@ -575,11 +580,11 @@ extension CostUsageStore {
     }
 
     private func validateExistingDatabase(_ database: OpaquePointer) throws {
-        let state: (storedHash: String, isCurrent: Bool, canAdoptPredecessor: Bool)
+        let state: (storedHash: String, isCurrent: Bool, canAdoptPredecessor: Bool, canMigrateSchema: Bool)
         try Self.execute(database, "BEGIN")
         do {
             state = try self.databaseCompatibilityState(database)
-            guard state.isCurrent || state.canAdoptPredecessor else {
+            guard state.isCurrent || state.canAdoptPredecessor || state.canMigrateSchema else {
                 throw StoreError.incompatibleSchema
             }
             try Self.validateDatabaseIntegrity(database, recorder: self.scopedReadWorkRecorderForTesting)
@@ -597,11 +602,16 @@ extension CostUsageStore {
             // Another process may have adopted the predecessor while this connection waited
             // for the writer lock. Re-read the compatibility state before changing metadata.
             let lockedState = try self.databaseCompatibilityState(database)
-            guard lockedState.isCurrent || lockedState.canAdoptPredecessor else {
+            guard lockedState.isCurrent || lockedState.canAdoptPredecessor || lockedState.canMigrateSchema
+            else {
                 throw StoreError.incompatibleSchema
             }
             try Self.validateDatabaseIntegrity(database, recorder: self.scopedReadWorkRecorderForTesting)
-            if lockedState.canAdoptPredecessor {
+            if lockedState.canMigrateSchema {
+                let storedBase = Self.baseVersion(
+                    of: try Self.scalarInt(database, "PRAGMA user_version"))
+                try self.migrateSchemaForward(database, storedBase: storedBase)
+            } else if lockedState.canAdoptPredecessor {
                 try self.adoptCompatiblePredecessor(database, storedHash: lockedState.storedHash)
             }
             try Self.execute(database, "COMMIT")
@@ -614,7 +624,8 @@ extension CostUsageStore {
     private func databaseCompatibilityState(_ database: OpaquePointer) throws -> (
         storedHash: String,
         isCurrent: Bool,
-        canAdoptPredecessor: Bool)
+        canAdoptPredecessor: Bool,
+        canMigrateSchema: Bool)
     {
         let actualVersion = try Self.scalarInt(database, "PRAGMA user_version")
         guard let storedHash = try Self.scalarText(
@@ -630,7 +641,32 @@ extension CostUsageStore {
             && self.expectedSchemaVersion == Self.schemaVersion
             && Self.compatiblePredecessorParserHashes.contains(storedHash)
             && actualVersion == Int64(predecessorVersion)
-        return (storedHash, isCurrent, canAdoptPredecessor)
+        // A database that is a valid stamp for an older base version is migrated forward rather
+        // than rebuilt: adoptCompatiblePredecessor cannot carry a base bump, because the
+        // predecessor stamp above is computed from the *current* baseSchemaVersion.
+        let storedBase = Self.baseVersion(of: actualVersion)
+        let canMigrateSchema = !isCurrent
+            && storedBase < Self.baseSchemaVersion
+            && actualVersion == Int64(Self.combinedSchemaVersion(base: storedBase, parserHash: storedHash))
+        return (storedHash, isCurrent, canAdoptPredecessor, canMigrateSchema)
+    }
+
+    /// Explicit, transactional v3 -> v4 migration. Runs inside the caller's write transaction:
+    /// create the exact new tables, then stamp metadata last so a failure rolls back unstamped.
+    private func migrateSchemaForward(_ database: OpaquePointer, storedBase: Int) throws {
+        if storedBase < 4 {
+            try Self.execute(database, Self.claudeSchemaSQL)
+        }
+        let statement = try Self.prepare(database, "UPDATE meta SET value = ? WHERE key = 'parser_hash'")
+        defer { sqlite3_finalize(statement) }
+        Self.bind(self.expectedParserHash, to: statement, at: 1)
+        try Self.stepDone(statement, database: database)
+        try Self.execute(database, "PRAGMA user_version = \(self.expectedSchemaVersion)")
+        // A clean check returns no rows at all, so step it directly: scalarText treats
+        // SQLITE_DONE as a failure.
+        let check = try Self.prepare(database, "PRAGMA foreign_key_check")
+        defer { sqlite3_finalize(check) }
+        guard sqlite3_step(check) == SQLITE_DONE else { throw StoreError.invalidData }
     }
 
     private static func validateDatabaseIntegrity(
@@ -673,6 +709,7 @@ extension CostUsageStore {
 
     private func createSchema(_ database: OpaquePointer) throws {
         try Self.execute(database, Self.schemaSQL)
+        try Self.execute(database, Self.claudeSchemaSQL)
         try Self.execute(database, "PRAGMA user_version = \(self.expectedSchemaVersion)")
         let statement = try Self.prepare(database, "INSERT INTO meta(key, value) VALUES ('parser_hash', ?)")
         defer { sqlite3_finalize(statement) }
@@ -727,6 +764,78 @@ extension CostUsageStore {
 // MARK: - Schema
 
 extension CostUsageStore {
+    /// Claude tables, kept separate so the v3 -> v4 migration can create exactly this shape.
+    /// Claude owns its own file namespace; see `ClaudeStoreSourceFile`.
+    static let claudeSchemaSQL = """
+    CREATE TABLE claude_source_files (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        path_sort_key BLOB NOT NULL,
+        file_identity TEXT,
+        size INTEGER NOT NULL,
+        mtime_ms INTEGER NOT NULL,
+        parsed_offset INTEGER NOT NULL,
+        coverage_since_day TEXT,
+        coverage_until_day TEXT,
+        parser_revision INTEGER NOT NULL,
+        tz_identity TEXT NOT NULL,
+        complete INTEGER NOT NULL
+    );
+    CREATE INDEX claude_source_files_coverage_idx
+        ON claude_source_files(coverage_since_day, coverage_until_day);
+    CREATE TABLE claude_usage_events (
+        file_id INTEGER NOT NULL REFERENCES claude_source_files(id) ON DELETE CASCADE,
+        row_index INTEGER NOT NULL,
+        ts_ms INTEGER,
+        day TEXT NOT NULL,
+        backend TEXT NOT NULL,
+        model TEXT NOT NULL,
+        raw_model TEXT NOT NULL,
+        session_id TEXT,
+        message_id TEXT,
+        request_id TEXT,
+        cwd TEXT,
+        git_branch TEXT,
+        path_role TEXT NOT NULL,
+        is_sidechain INTEGER NOT NULL,
+        effort TEXT,
+        service_tier TEXT,
+        input INTEGER NOT NULL,
+        cache_read INTEGER NOT NULL,
+        cache_create INTEGER NOT NULL,
+        cache_create_1h INTEGER NOT NULL,
+        output INTEGER NOT NULL,
+        thinking_tokens INTEGER NOT NULL,
+        web_search_reqs INTEGER NOT NULL,
+        web_fetch_reqs INTEGER NOT NULL,
+        ingest_cost_nanos INTEGER NOT NULL,
+        ingest_cost_priced INTEGER NOT NULL,
+        PRIMARY KEY(file_id, row_index)
+    );
+    CREATE UNIQUE INDEX claude_usage_events_canonical_idx
+        ON claude_usage_events(file_id, backend, message_id, request_id)
+        WHERE message_id IS NOT NULL AND request_id IS NOT NULL;
+    CREATE INDEX claude_usage_events_report_idx
+        ON claude_usage_events(backend, day, model);
+    CREATE TABLE claude_model_prices (
+        model TEXT NOT NULL,
+        backend TEXT NOT NULL,
+        valid_from TEXT NOT NULL,
+        valid_to TEXT,
+        input_per_mtok REAL NOT NULL,
+        cache_read_per_mtok REAL NOT NULL,
+        cache_write_per_mtok REAL NOT NULL,
+        cache_write_1h_per_mtok REAL NOT NULL,
+        output_per_mtok REAL NOT NULL,
+        long_context_threshold INTEGER,
+        long_context_input_per_mtok REAL,
+        long_context_cache_read_per_mtok REAL,
+        long_context_cache_write_per_mtok REAL,
+        long_context_output_per_mtok REAL,
+        PRIMARY KEY(model, backend, valid_from)
+    );
+    """
+
     private static let schemaSQL = """
     CREATE TABLE meta (
         key TEXT PRIMARY KEY NOT NULL,

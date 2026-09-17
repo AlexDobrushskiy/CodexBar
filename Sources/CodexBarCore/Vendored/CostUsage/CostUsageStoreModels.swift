@@ -249,3 +249,60 @@ struct CostUsageStoreConfiguration: Equatable, Sendable {
     var autoVacuumMode: Int
     var userVersion: Int
 }
+
+// MARK: - Claude usage store (schema v4)
+
+/// One Claude transcript file tracked by the store.
+///
+/// Claude keeps its own file namespace rather than reusing `files`: every dependent of `files`
+/// cascades on delete, and `retainDayWindow` prunes it by Codex coverage and fork rules, so Claude
+/// events hung off that table would be deleted by Codex retention.
+struct ClaudeStoreSourceFile: Codable, Equatable, Sendable {
+    var path: String
+    /// Inode or equivalent; a change means the path now points at a different file.
+    var fileIdentity: String?
+    var size: Int64
+    var mtimeMs: Int64
+    var parsedOffset: Int64
+    var coverageSinceDay: String?
+    var coverageUntilDay: String?
+    var parserRevision: Int
+    /// Calendar identity the `day` column was bucketed under; `day` is not timeless.
+    var tzIdentity: String
+    var complete: Bool
+}
+
+/// One reconciled Claude usage row.
+///
+/// Within-file streaming chunks are already collapsed by the parser, so this is the per-file
+/// winner. Cross-file parent/subagent candidates all persist; the winner is chosen by the
+/// reconciliation view so that deleting a winner reveals the loser.
+struct ClaudeStoreUsageEvent: Codable, Equatable, Sendable {
+    var rowIndex: Int
+    var timestampUnixMs: Int64?
+    var day: String
+    var backend: String
+    var model: String
+    /// Model exactly as written in the transcript, so alias or pricing changes need no reparse.
+    var rawModel: String
+    var sessionID: String?
+    var messageID: String?
+    var requestID: String?
+    var cwd: String?
+    var gitBranch: String?
+    var pathRole: String
+    var isSidechain: Bool
+    var effort: String?
+    var serviceTier: String?
+    var input: Int
+    var cacheRead: Int
+    var cacheCreate: Int
+    var cacheCreate1h: Int
+    var output: Int
+    var thinkingTokens: Int
+    var webSearchRequests: Int
+    var webFetchRequests: Int
+    /// Cost priced at ingest; the pricing view prefers the current catalog and falls back to this.
+    var ingestCostNanos: Int
+    var ingestCostPriced: Bool
+}
