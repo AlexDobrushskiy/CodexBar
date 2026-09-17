@@ -10,7 +10,7 @@ struct ClaudeUsageRowDetailTests {
     private static func transcriptLine(
         timestamp: String,
         messageID: String,
-        model: String) -> String
+        model: String) throws -> String
     {
         let entry: [String: Any] = [
             "type": "assistant",
@@ -38,8 +38,8 @@ struct ClaudeUsageRowDetailTests {
                 ],
             ],
         ]
-        let data = try! JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
+        let data = try JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
+        return try #require(String(bytes: data, encoding: .utf8))
     }
 
     private static func parsedRow(
