@@ -54,7 +54,7 @@ enum CostUsageScanner {
     ///
     /// Provider-specific by design: these cases name the backends the Claude log format can carry,
     /// not a dispatch over `UsageProvider`.
-    enum ClaudeLogBackend: CaseIterable, Sendable {
+    enum ClaudeLogBackend: String, Codable, CaseIterable, Sendable {
         /// Anthropic first-party (subscription or direct API).
         case firstParty
         case vertexAI
@@ -1996,6 +1996,19 @@ enum CostUsageScanner {
     struct ClaudeUsageRow: Codable, Equatable {
         let dayKey: String
         let model: String
+        /// Model exactly as written in the transcript, so an alias or pricing change never needs a
+        /// transcript reparse. Optional so caches written before this field still decode.
+        var rawModel: String?
+        /// Which API backend billed this row; the ledger split is a column, not a second scan.
+        var backend: ClaudeLogBackend?
+        /// Working directory the session ran in — the basis for per-project reporting.
+        var cwd: String?
+        var gitBranch: String?
+        var effort: String?
+        var serviceTier: String?
+        var thinkingTokens: Int?
+        var webSearchRequests: Int?
+        var webFetchRequests: Int?
         let sessionId: String?
         let messageId: String?
         let requestId: String?

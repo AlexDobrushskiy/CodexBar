@@ -208,9 +208,20 @@ extension CostUsageScanner {
                             ?? obj.dictionary("metadata")?["sessionId"] as? String
                             ?? message.dictionary("metadata")?["sessionId"] as? String
                         let normalizedModel = pricingResolver.normalize(model)
+                        let toolUse = usage.dictionary("server_tool_use")
                         let row = ClaudeUsageRow(
                             dayKey: dayKey,
                             model: normalizedModel,
+                            rawModel: model,
+                            backend: Self.claudeLogBackend(obj: obj, message: message),
+                            cwd: obj["cwd"] as? String,
+                            gitBranch: obj["gitBranch"] as? String,
+                            effort: obj["effort"] as? String,
+                            serviceTier: usage["service_tier"] as? String,
+                            thinkingTokens: toInt(
+                                usage.dictionary("output_tokens_details")?["thinking_tokens"]),
+                            webSearchRequests: toInt(toolUse?["web_search_requests"]),
+                            webFetchRequests: toInt(toolUse?["web_fetch_requests"]),
                             sessionId: sessionId,
                             messageId: messageId,
                             requestId: requestId,
