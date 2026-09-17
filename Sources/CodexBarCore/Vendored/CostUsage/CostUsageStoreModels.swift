@@ -350,12 +350,39 @@ extension ClaudeStoreReconciledEvent {
 struct ClaudeStoreReportRow: Equatable, Sendable {
     var day: String
     var model: String
-    var timestampUnixMs: Int64?
     var input: Int
     var cacheRead: Int
     var cacheCreate: Int
-    var cacheCreate1h: Int
     var output: Int
-    var ingestCostNanos: Int
-    var ingestCostPriced: Bool
+    /// Already priced — by `claude_event_costs` for stored rows, by the resolver otherwise.
+    /// `nil` means no catalog and no ingest price, which makes its whole day×model bucket unpriced.
+    var costUSD: Double?
+}
+
+/// One model's rates for one backend over one validity window.
+///
+/// Rates are per token, matching the Swift cost formula exactly. Windows are half-open
+/// `[validFromMs, validToMs)` so at most one row can join an event; overlapping windows would
+/// multiply rows through `claude_event_costs`.
+struct ClaudeStoreModelPrice: Equatable, Sendable {
+    /// The normalized model, matching `claude_usage_events.model`; see `claudePricingSchemaSQL`.
+    var model: String
+    var backend: String
+    var validFromMs: Int64
+    var validToMs: Int64?
+    var inputPerToken: Double
+    var cacheReadPerToken: Double
+    var cacheWritePerToken: Double
+    var outputPerToken: Double
+    var longContextThreshold: Int?
+    var longContextInputPerToken: Double?
+    var longContextCacheReadPerToken: Double?
+    var longContextCacheWritePerToken: Double?
+    var longContextOutputPerToken: Double?
+}
+
+/// One `(model, backend)` pair, the grain the Claude price catalog is keyed at.
+struct ClaudeStoreModelKey: Hashable, Sendable {
+    var model: String
+    var backend: String
 }

@@ -82,8 +82,33 @@ unrecoverable; a view can be corrected without a rescan.
 
 ### `claude_reconciled_events`
 
-See below. `claude_model_prices` is versioned by `(model, backend, valid_from)`; cost is a view over
-events × prices, applied **per event** because long-context pricing tiers make pre-aggregation wrong.
+See below.
+
+### `claude_model_prices` and `claude_event_costs` (v5)
+
+Tokens are the stored fact; cost is a view. `claude_model_prices` is versioned by
+`(model, backend, valid_from_ms)` with half-open `[valid_from_ms, valid_to_ms)` windows, so exactly
+one row can join an event — overlapping windows would multiply rows through the view.
+
+Three deliberate departures from the first sketch of this table:
+
+- **Rates are per token, not per Mtok.** The Swift formula multiplies per-token rates; dividing a
+  per-million rate in SQL differs from it by an ulp on rates that are not exactly representable.
+- **There is no stored 1h cache-write rate.** A one-hour cache write costs twice the *tier-selected*
+  input rate, so a flat stored rate would contradict the formula on any long-context event.
+- **Prices key on the normalized `model`, not `raw_model`.** Ingest prices each row by the id the
+  transcript wrote, but a report has always repriced by the normalized identity its rows are
+  bucketed under, so several dated spellings of one model report at one rate.
+
+Model-id routing, aliases and catalog fallbacks stay in Swift — `CostUsagePricing.claudePricing`
+resolves the rates and the scan seeds them for every model the store holds. Only the arithmetic is
+in SQL. `claude_event_costs` selects the long-context tier **per event**, because thresholds are per
+request and pre-aggregating tokens would price a busy day at the wrong tier. Its precedence matches
+the report's: a row priced to exactly zero at ingest stays zero, then the current catalog, then the
+ingest cost, then unpriced.
+
+A row with no timestamp cannot be placed in a validity window, so it does not join and falls back to
+its ingest cost. The parser requires a parseable timestamp, so that is a guard rather than a path.
 
 ## Reconciliation
 
@@ -119,7 +144,7 @@ APFS stores filenames decomposed. Measured on `/p/cafe<U+0301>/` versus `/p/cafz
 They invert. Ordering on the raw path would make the view and the scanner disagree about which
 equal-rank sidechain wins for any non-ASCII project path.
 
-## Migration v3 → v4
+## Migration v3 → v4 → v5
 
 Explicit and transactional, **not** via `adoptCompatiblePredecessor`. That hook proves same-base
 parser compatibility only: `canAdoptPredecessor` recomputes the predecessor stamp from the *current*
@@ -131,6 +156,12 @@ Order: validate v3 → `CREATE` the new objects (exact, not `IF NOT EXISTS`) →
 `user_version` last → `foreign_key_check` → commit; roll back or rebuild on failure. This preserves
 the live Codex ledger, whose discovery, accumulator, buffer and previous-report state a full rebuild
 would discard.
+
+v4 → v5 adds `claude_model_prices` in its corrected shape and the `claude_event_costs` view. The v4
+table shipped with no writer and the wrong column types, so it is dropped and recreated rather than
+altered; nothing can be carried across. Leaving it in place makes the migration's exact `CREATE
+TABLE` collide, roll back and rebuild, which silently drops both ledgers — the same trap as leaving a
+view behind on the v3 path. There is a regression test for exactly that.
 
 Note that a clean `PRAGMA foreign_key_check` returns **no rows**, so it must be stepped directly —
 `scalarText` treats `SQLITE_DONE` as a failure.
@@ -159,15 +190,15 @@ belongs to the ledger and its rows are swept; roots belonging to another profile
 
 ## Status
 
-Landed: the schema and migration, event storage, the reconciliation view, the parser detail fields,
-the scan→store mirror, and the unified read path — Claude, Vertex and Bedrock reports are now built
-from the store. Verified against a real vault — 1,921 transcripts and 55,921 events, with the Codex
+Landed: the schema and migrations, event storage, the reconciliation view, the parser detail fields,
+the scan→store mirror, the unified read path — Claude, Vertex and Bedrock reports are now built from
+the store — and the price catalog with its cost view, which every report now reads its costs from. Verified against a real vault — 1,921 transcripts and 55,921 events, with the Codex
 ledger preserved across the migration.
 
-Not yet landed: the pricing view (`claude_model_prices` still has no writer), Claude retention in
-`retainDayWindow`, optimistic CAS on `claude_source_files`, time-zone invalidation and re-stat at
-commit, and retirement of the `claude-v6.json` / `bedrock-v6.json` artifacts, which are still the
-incremental parse state. Each provider keeps its own artifact, so the first scan after this change
+Not yet landed: Claude retention in `retainDayWindow`, optimistic CAS on `claude_source_files`,
+time-zone invalidation and re-stat at commit, backend-aware pricing (Bedrock rows still price
+against the first-party catalog even though models.dev carries `amazon-bedrock`), and retirement of
+the `claude-v6.json` / `bedrock-v6.json` artifacts, which are still the incremental parse state. Each provider keeps its own artifact, so the first scan after this change
 re-parses once per enabled Claude-family provider; the store write itself is skipped for files whose
 recorded state has not moved.
 

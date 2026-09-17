@@ -44,7 +44,7 @@ enum CostUsagePricing {
         }
     }
 
-    struct ClaudePricing {
+    struct ClaudePricing: Equatable {
         let inputCostPerToken: Double
         let outputCostPerToken: Double
         let cacheCreationInputCostPerToken: Double
@@ -439,7 +439,9 @@ enum CostUsagePricing {
             cacheWriteInputCostPerTokenAboveThreshold: 2.5e-6),
     ]
 
-    private static let claudeFullContextStandardPricingCutoff = Date(timeIntervalSince1970: 1_773_360_000)
+    /// Instant the full-context models moved to standard pricing. Exposed so a price table can
+    /// persist one window on each side of it rather than re-deriving the rule.
+    static let claudeFullContextStandardPricingCutoff = Date(timeIntervalSince1970: 1_773_360_000)
     private static let claudeHistoricalLongContext: [String: ClaudePricing] = [
         "claude-opus-4-6": ClaudePricing(
             inputCostPerToken: 5e-6,
@@ -792,26 +794,48 @@ enum CostUsagePricing {
         pricingDate: Date?,
         modelsDevLookup: () -> ModelsDevPricingLookup?) -> Double?
     {
+        self.claudePricing(
+            normalizedModel: key,
+            pricingDate: pricingDate,
+            modelsDevLookup: modelsDevLookup)
+            .map { self.claudeCostUSD(pricing: $0, tokens: tokens) }
+    }
+
+    /// The rates the Claude cost formula would apply to one model at one instant.
+    ///
+    /// Split out of `claudeCostUSD` so the usage store can persist rates and do the arithmetic in
+    /// SQL without reimplementing model-id routing. Resolution order is unchanged: a dated
+    /// full-context override, then models.dev, then the built-in table.
+    static func claudePricing(
+        normalizedModel key: String,
+        pricingDate: Date?,
+        modelsDevLookup: () -> ModelsDevPricingLookup?) -> ClaudePricing?
+    {
         if let pricingDate,
            let historicalPricing = self.claudeHistoricalLongContext[key],
            let currentPricing = self.claude[key]
         {
-            return self.claudeCostUSD(
-                pricing: pricingDate < self.claudeFullContextStandardPricingCutoff
-                    ? historicalPricing
-                    : currentPricing,
-                tokens: tokens)
+            return pricingDate < self.claudeFullContextStandardPricingCutoff
+                ? historicalPricing
+                : currentPricing
         }
         if let lookup = modelsDevLookup() {
-            return self.claudeCostUSD(
-                pricing: lookup.pricing,
-                tokens: tokens)
+            return self.claudePricing(modelsDev: lookup.pricing)
         }
+        return self.claude[key]
+    }
 
-        guard let pricing = self.claude[key] else { return nil }
-        return self.claudeCostUSD(
-            pricing: pricing,
-            tokens: tokens)
+    private static func claudePricing(modelsDev pricing: ModelsDevPricingInfo) -> ClaudePricing {
+        ClaudePricing(
+            inputCostPerToken: pricing.inputCostPerToken,
+            outputCostPerToken: pricing.outputCostPerToken,
+            cacheCreationInputCostPerToken: pricing.cacheCreationInputCostPerToken ?? pricing.inputCostPerToken,
+            cacheReadInputCostPerToken: pricing.cacheReadInputCostPerToken ?? pricing.inputCostPerToken,
+            thresholdTokens: pricing.thresholdTokens,
+            inputCostPerTokenAboveThreshold: pricing.inputCostPerTokenAboveThreshold,
+            outputCostPerTokenAboveThreshold: pricing.outputCostPerTokenAboveThreshold,
+            cacheCreationInputCostPerTokenAboveThreshold: pricing.cacheCreationInputCostPerTokenAboveThreshold,
+            cacheReadInputCostPerTokenAboveThreshold: pricing.cacheReadInputCostPerTokenAboveThreshold)
     }
 
     private static func claudeCostUSD(
@@ -844,24 +868,6 @@ enum CostUsagePricing {
             + Double(cacheCreation5m) * cacheCreation5mRate
             + Double(cacheCreation1h) * inputRate * 2
             + Double(max(0, tokens.output)) * outputRate
-    }
-
-    private static func claudeCostUSD(
-        pricing: ModelsDevPricingInfo,
-        tokens: ClaudeCostTokens) -> Double
-    {
-        self.claudeCostUSD(
-            pricing: ClaudePricing(
-                inputCostPerToken: pricing.inputCostPerToken,
-                outputCostPerToken: pricing.outputCostPerToken,
-                cacheCreationInputCostPerToken: pricing.cacheCreationInputCostPerToken ?? pricing.inputCostPerToken,
-                cacheReadInputCostPerToken: pricing.cacheReadInputCostPerToken ?? pricing.inputCostPerToken,
-                thresholdTokens: pricing.thresholdTokens,
-                inputCostPerTokenAboveThreshold: pricing.inputCostPerTokenAboveThreshold,
-                outputCostPerTokenAboveThreshold: pricing.outputCostPerTokenAboveThreshold,
-                cacheCreationInputCostPerTokenAboveThreshold: pricing.cacheCreationInputCostPerTokenAboveThreshold,
-                cacheReadInputCostPerTokenAboveThreshold: pricing.cacheReadInputCostPerTokenAboveThreshold),
-            tokens: tokens)
     }
 
     static func modelsDevCatalog(now: Date = Date(), cacheRoot: URL? = nil) -> ModelsDevCatalog? {
@@ -971,6 +977,16 @@ extension CostUsagePricing {
                 output: outputTokens)
             let key = self.normalize(model)
             return CostUsagePricing.claudeCostUSD(normalizedModel: key, tokens: tokens, pricingDate: pricingDate) {
+                self.lookup(model)
+            }
+        }
+
+        /// Rates for one model at one instant, through the same memos `costUSD` uses.
+        func pricing(model: String, pricingDate: Date?) -> CostUsagePricing.ClaudePricing? {
+            CostUsagePricing.claudePricing(
+                normalizedModel: self.normalize(model),
+                pricingDate: pricingDate)
+            {
                 self.lookup(model)
             }
         }

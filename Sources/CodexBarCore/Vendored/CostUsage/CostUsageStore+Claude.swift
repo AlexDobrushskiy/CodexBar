@@ -307,7 +307,7 @@ extension CostUsageStore {
         }
     }
 
-    /// Reconciled rows for one ledger's report: a day window, a set of backends, a set of roots.
+    /// Priced reconciled rows for one ledger's report: a day window, backends, roots.
     ///
     /// This is the read path the ledger split runs on. Scoping here rather than re-scanning with a
     /// row filter is what lets one unfiltered scan serve Claude, Vertex and Bedrock at once.
@@ -335,9 +335,8 @@ extension CostUsageStore {
                 .map { _ in "(source_path >= ? AND source_path < ?)" }
                 .joined(separator: " OR ") + ")"
             let statement = try Self.prepare(database, """
-            SELECT day, model, ts_ms, input, cache_read, cache_create, cache_create_1h, output,
-                   ingest_cost_nanos, ingest_cost_priced
-            FROM claude_reconciled_events
+            SELECT day, model, input, cache_read, cache_create, output, cost_usd
+            FROM claude_event_costs
             WHERE day >= ? AND day <= ?\(backendClause)\(rootClause)
             """)
             defer { sqlite3_finalize(statement) }
@@ -358,15 +357,12 @@ extension CostUsageStore {
                 rows.append(ClaudeStoreReportRow(
                     day: Self.columnText(statement, at: 0) ?? "",
                     model: Self.columnText(statement, at: 1) ?? "",
-                    timestampUnixMs: sqlite3_column_type(statement, 2) == SQLITE_NULL
-                        ? nil : sqlite3_column_int64(statement, 2),
-                    input: Int(sqlite3_column_int64(statement, 3)),
-                    cacheRead: Int(sqlite3_column_int64(statement, 4)),
-                    cacheCreate: Int(sqlite3_column_int64(statement, 5)),
-                    cacheCreate1h: Int(sqlite3_column_int64(statement, 6)),
-                    output: Int(sqlite3_column_int64(statement, 7)),
-                    ingestCostNanos: Int(sqlite3_column_int64(statement, 8)),
-                    ingestCostPriced: sqlite3_column_int64(statement, 9) != 0))
+                    input: Int(sqlite3_column_int64(statement, 2)),
+                    cacheRead: Int(sqlite3_column_int64(statement, 3)),
+                    cacheCreate: Int(sqlite3_column_int64(statement, 4)),
+                    output: Int(sqlite3_column_int64(statement, 5)),
+                    costUSD: sqlite3_column_type(statement, 6) == SQLITE_NULL
+                        ? nil : sqlite3_column_double(statement, 6)))
             }
             return rows
         }

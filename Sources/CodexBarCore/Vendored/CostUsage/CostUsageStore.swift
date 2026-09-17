@@ -74,7 +74,7 @@ actor CostUsageStore {
 
     static let log = CodexBarLog.logger(LogCategories.tokenCost)
     static let databaseFilename = "cost-usage.sqlite"
-    static let baseSchemaVersion = 4
+    static let baseSchemaVersion = 5
     static let schemaVersion = CostUsageStore.combinedSchemaVersion(
         base: CostUsageStore.baseSchemaVersion,
         parserHash: CodexParserHash.value)
@@ -651,11 +651,19 @@ extension CostUsageStore {
         return (storedHash, isCurrent, canAdoptPredecessor, canMigrateSchema)
     }
 
-    /// Explicit, transactional v3 -> v4 migration. Runs inside the caller's write transaction:
-    /// create the exact new tables, then stamp metadata last so a failure rolls back unstamped.
+    /// Explicit, transactional forward migration. Runs inside the caller's write transaction:
+    /// create the exact new objects, then stamp metadata last so a failure rolls back unstamped.
     private func migrateSchemaForward(_ database: OpaquePointer, storedBase: Int) throws {
         if storedBase < 4 {
             try Self.execute(database, Self.claudeSchemaSQL)
+        }
+        if storedBase < 5 {
+            // v4 shipped an empty `claude_model_prices` with no writer and the wrong column types;
+            // nothing can be carried across, so it is replaced rather than altered.
+            if storedBase >= 4 {
+                try Self.execute(database, "DROP TABLE IF EXISTS claude_model_prices")
+            }
+            try Self.execute(database, Self.claudePricingSchemaSQL)
         }
         let statement = try Self.prepare(database, "UPDATE meta SET value = ? WHERE key = 'parser_hash'")
         defer { sqlite3_finalize(statement) }
@@ -710,6 +718,7 @@ extension CostUsageStore {
     private func createSchema(_ database: OpaquePointer) throws {
         try Self.execute(database, Self.schemaSQL)
         try Self.execute(database, Self.claudeSchemaSQL)
+        try Self.execute(database, Self.claudePricingSchemaSQL)
         try Self.execute(database, "PRAGMA user_version = \(self.expectedSchemaVersion)")
         let statement = try Self.prepare(database, "INSERT INTO meta(key, value) VALUES ('parser_hash', ?)")
         defer { sqlite3_finalize(statement) }
@@ -817,23 +826,6 @@ extension CostUsageStore {
         WHERE message_id IS NOT NULL AND request_id IS NOT NULL;
     CREATE INDEX claude_usage_events_report_idx
         ON claude_usage_events(backend, day, model);
-    CREATE TABLE claude_model_prices (
-        model TEXT NOT NULL,
-        backend TEXT NOT NULL,
-        valid_from TEXT NOT NULL,
-        valid_to TEXT,
-        input_per_mtok REAL NOT NULL,
-        cache_read_per_mtok REAL NOT NULL,
-        cache_write_per_mtok REAL NOT NULL,
-        cache_write_1h_per_mtok REAL NOT NULL,
-        output_per_mtok REAL NOT NULL,
-        long_context_threshold INTEGER,
-        long_context_input_per_mtok REAL,
-        long_context_cache_read_per_mtok REAL,
-        long_context_cache_write_per_mtok REAL,
-        long_context_output_per_mtok REAL,
-        PRIMARY KEY(model, backend, valid_from)
-    );
     CREATE VIEW claude_reconciled_events AS
     SELECT f.path AS source_path, e.*
     FROM claude_usage_events e
@@ -857,6 +849,79 @@ extension CostUsageStore {
         WHERE e.message_id IS NOT NULL AND e.request_id IS NOT NULL
     )
     WHERE rank_in_group = 1;
+    """
+
+    /// Claude pricing and the cost view, added in v5.
+    ///
+    /// Rates are stored **per token**, not per million: the Swift cost formula multiplies per-token
+    /// rates, and dividing a per-million rate here would differ from it by an ulp on rates that are
+    /// not exactly representable. One-hour cache writes are deliberately not a stored rate — they
+    /// are twice the *tier-selected* input rate, so a stored one would contradict the formula for
+    /// any long-context event.
+    ///
+    /// Prices key on the normalized `model`, not on `raw_model`. Ingest prices each row by the id
+    /// the transcript wrote, but a report has always repriced by the normalized identity the rows
+    /// are bucketed under, so several dated spellings of one model report at one rate.
+    ///
+    /// A row with no timestamp cannot be placed in a validity window, so it does not join and falls
+    /// back to its ingest cost. The parser requires a parseable timestamp, so this is a guard.
+    static let claudePricingSchemaSQL = """
+    CREATE TABLE claude_model_prices (
+        model TEXT NOT NULL,
+        backend TEXT NOT NULL,
+        valid_from_ms INTEGER NOT NULL,
+        valid_to_ms INTEGER,
+        input_per_token REAL NOT NULL,
+        cache_read_per_token REAL NOT NULL,
+        cache_write_per_token REAL NOT NULL,
+        output_per_token REAL NOT NULL,
+        long_context_threshold INTEGER,
+        long_context_input_per_token REAL,
+        long_context_cache_read_per_token REAL,
+        long_context_cache_write_per_token REAL,
+        long_context_output_per_token REAL,
+        PRIMARY KEY(model, backend, valid_from_ms)
+    );
+    CREATE VIEW claude_event_costs AS
+    SELECT e.*,
+           CASE
+               WHEN e.ingest_cost_priced = 1 AND e.ingest_cost_nanos = 0 THEN 0.0
+               WHEN p.model IS NOT NULL THEN
+                   e.input * (
+                       CASE WHEN p.long_context_threshold IS NOT NULL
+                                 AND e.input + e.cache_read + e.cache_create > p.long_context_threshold
+                            THEN COALESCE(p.long_context_input_per_token, p.input_per_token)
+                            ELSE p.input_per_token END)
+                   + e.cache_read * (
+                       CASE WHEN p.long_context_threshold IS NOT NULL
+                                 AND e.input + e.cache_read + e.cache_create > p.long_context_threshold
+                            THEN COALESCE(p.long_context_cache_read_per_token, p.cache_read_per_token)
+                            ELSE p.cache_read_per_token END)
+                   + (e.cache_create - MIN(e.cache_create_1h, e.cache_create)) * (
+                       CASE WHEN p.long_context_threshold IS NOT NULL
+                                 AND e.input + e.cache_read + e.cache_create > p.long_context_threshold
+                            THEN COALESCE(p.long_context_cache_write_per_token, p.cache_write_per_token)
+                            ELSE p.cache_write_per_token END)
+                   + MIN(e.cache_create_1h, e.cache_create) * (
+                       CASE WHEN p.long_context_threshold IS NOT NULL
+                                 AND e.input + e.cache_read + e.cache_create > p.long_context_threshold
+                            THEN COALESCE(p.long_context_input_per_token, p.input_per_token)
+                            ELSE p.input_per_token END) * 2
+                   + e.output * (
+                       CASE WHEN p.long_context_threshold IS NOT NULL
+                                 AND e.input + e.cache_read + e.cache_create > p.long_context_threshold
+                            THEN COALESCE(p.long_context_output_per_token, p.output_per_token)
+                            ELSE p.output_per_token END)
+               WHEN e.ingest_cost_priced = 1 THEN e.ingest_cost_nanos / 1000000000.0
+               ELSE NULL
+           END AS cost_usd
+    FROM claude_reconciled_events e
+    LEFT JOIN claude_model_prices p
+        ON p.model = e.model
+       AND p.backend = e.backend
+       AND e.ts_ms IS NOT NULL
+       AND p.valid_from_ms <= e.ts_ms
+       AND (p.valid_to_ms IS NULL OR e.ts_ms < p.valid_to_ms);
     """
 
     private static let schemaSQL = """
@@ -1079,6 +1144,14 @@ extension CostUsageStore {
 
     static func bind(_ value: Int?, to statement: OpaquePointer, at index: Int32) {
         self.bind(value.map(Int64.init), to: statement, at: index)
+    }
+
+    static func bind(_ value: Double?, to statement: OpaquePointer, at index: Int32) {
+        guard let value else {
+            sqlite3_bind_null(statement, index)
+            return
+        }
+        sqlite3_bind_double(statement, index, value)
     }
 
     static func bind(_ value: Data?, to statement: OpaquePointer, at index: Int32) {

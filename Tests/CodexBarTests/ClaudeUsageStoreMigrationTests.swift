@@ -22,7 +22,8 @@ struct ClaudeUsageStoreMigrationTests {
         var handle: OpaquePointer?
         #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
         defer { sqlite3_close_v2(handle) }
-        let drops = "DROP VIEW IF EXISTS claude_reconciled_events;"
+        let drops = "DROP VIEW IF EXISTS claude_event_costs;"
+            + "DROP VIEW IF EXISTS claude_reconciled_events;"
             + "DROP TABLE IF EXISTS claude_usage_events;"
             + "DROP TABLE IF EXISTS claude_source_files;"
             + "DROP TABLE IF EXISTS claude_model_prices;"
@@ -81,6 +82,95 @@ struct ClaudeUsageStoreMigrationTests {
             parserHash: Self.parserHash)
 
         #expect(await v4.readSnapshot().files.map(\.path) == ["/codex/a.jsonl"])
+    }
+
+    /// v4 shipped `claude_model_prices` with no writer and the wrong column types, so v5 replaces
+    /// it outright. Reproduce that exact shape, including the missing cost view.
+    private static func makeGenuinelyV4(at url: URL) {
+        var handle: OpaquePointer?
+        #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        defer { sqlite3_close_v2(handle) }
+        let sql = "DROP VIEW IF EXISTS claude_event_costs;"
+            + "DROP TABLE IF EXISTS claude_model_prices;"
+            + """
+            CREATE TABLE claude_model_prices (
+                model TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                valid_from TEXT NOT NULL,
+                valid_to TEXT,
+                input_per_mtok REAL NOT NULL,
+                cache_read_per_mtok REAL NOT NULL,
+                cache_write_per_mtok REAL NOT NULL,
+                cache_write_1h_per_mtok REAL NOT NULL,
+                output_per_mtok REAL NOT NULL,
+                long_context_threshold INTEGER,
+                long_context_input_per_mtok REAL,
+                long_context_cache_read_per_mtok REAL,
+                long_context_cache_write_per_mtok REAL,
+                long_context_output_per_mtok REAL,
+                PRIMARY KEY(model, backend, valid_from)
+            );
+            """
+        #expect(sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK)
+    }
+
+    @Test
+    func `migrating to v5 replaces the price table and keeps the claude rows`() async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let path = "/Users/alex/.claude/projects/-p/s.jsonl"
+        let v4 = CostUsageStore(
+            cacheRoot: env.cacheRoot,
+            schemaVersion: Self.version(base: 4),
+            parserHash: Self.parserHash)
+        #expect(await v4.upsertFile(Self.codexFile(path: "/codex/a.jsonl")))
+        let fileID = try #require(await v4.upsertClaudeSourceFile(Self.sourceFile(path: path)))
+        #expect(await v4.appendClaudeUsageEvents(fileID: fileID, events: [Self.usageEvent()]))
+        Self.makeGenuinelyV4(at: v4.databaseURL)
+
+        let v5 = CostUsageStore(
+            cacheRoot: env.cacheRoot,
+            schemaVersion: Self.version(base: 5),
+            parserHash: Self.parserHash)
+
+        #expect(await v5.readSnapshot().files.map(\.path) == ["/codex/a.jsonl"])
+        #expect(await v5.readClaudeSourceFiles().map(\.path) == [path])
+        #expect(await v5.readClaudeModelPrices().isEmpty, "the v4 table carried nothing across")
+        // The cost view only exists at v5, so a non-empty read proves it was created.
+        #expect(await v5.readClaudeReportRows(
+            backends: nil,
+            roots: ["/Users/alex/.claude/projects"],
+            sinceDay: "2026-09-01",
+            untilDay: "2026-09-30").count == 1)
+    }
+
+    private static func usageEvent() -> ClaudeStoreUsageEvent {
+        ClaudeStoreUsageEvent(
+            rowIndex: 0,
+            timestampUnixMs: 1_789_000_000_000,
+            day: "2026-09-17",
+            backend: "firstParty",
+            model: "claude-opus-5",
+            rawModel: "claude-opus-5",
+            sessionID: "s1",
+            messageID: "m1",
+            requestID: "r1",
+            cwd: "/p",
+            gitBranch: nil,
+            pathRole: "main",
+            isSidechain: false,
+            effort: nil,
+            serviceTier: nil,
+            input: 10,
+            cacheRead: 0,
+            cacheCreate: 0,
+            cacheCreate1h: 0,
+            output: 20,
+            thinkingTokens: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            ingestCostNanos: 1000,
+            ingestCostPriced: true)
     }
 
     @Test

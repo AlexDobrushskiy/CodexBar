@@ -828,9 +828,8 @@ extension CostUsageScanner {
                 sourceFileIDs: artifact.sourceFileIDs,
                 scope: (backend: backendScope, roots: ledgerRoots),
                 range: range,
-                options: options),
-            range: range,
-            pricingResolver: pricingResolver)
+                options: (scan: options, pricingResolver: pricingResolver)),
+            range: range)
         try checkCancellation?()
 
         let finalCacheArtifactStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
@@ -890,12 +889,18 @@ extension CostUsageScanner {
         sourceFileIDs: [String: String],
         scope: (backend: ClaudeLogProviderFilter, roots: [String]),
         range: CostUsageDayRange,
-        options: Options) -> [ClaudeStoreReportRow]
+        options: (scan: Options, pricingResolver: CostUsagePricing.ClaudeResolver))
+        -> [ClaudeStoreReportRow]
     {
-        guard options.claudeLogProviderFilter == .all else {
-            return self.claudeReportRows(cache: cache, backendScope: scope.backend, range: range)
+        guard options.scan.claudeLogProviderFilter == .all else {
+            options.pricingResolver.prepareCatalog()
+            return self.claudeReportRows(
+                cache: cache,
+                backendScope: scope.backend,
+                range: range,
+                pricingResolver: options.pricingResolver)
         }
-        let store = CostUsageStore(cacheRoot: options.cacheRoot)
+        let store = CostUsageStore(cacheRoot: options.scan.cacheRoot)
         // Unconditional, not gated on whether this run rewrote the cache: the report is read back
         // out of the store, so a run that reuses an untouched cache still needs it current.
         Self.syncClaudeStore(
@@ -904,11 +909,68 @@ extension CostUsageScanner {
             sourceFileIDs: sourceFileIDs,
             ledgerRoots: scope.roots,
             calendar: range.calendar)
+        // Seed prices before reading: `claude_event_costs` joins them, and a scan that added a
+        // model the catalog has would otherwise report it as unpriced until the next refresh.
+        Self.seedClaudeModelPrices(store: store, pricingResolver: options.pricingResolver)
         return store.syncReadClaudeReportRows(
             backends: Self.claudeBackendRawValues(scope.backend),
             roots: scope.roots,
             sinceDay: range.sinceKey,
             untilDay: range.untilKey)
+    }
+
+    /// Writes the rates `claude_event_costs` prices with, for every model the store holds.
+    ///
+    /// Model-id routing and catalog fallbacks stay in Swift; only the arithmetic moves to SQL. The
+    /// full-context models changed tier pricing at a known instant, so those get one window on each
+    /// side of it and every other model gets a single open-ended one.
+    static func seedClaudeModelPrices(
+        store: CostUsageStore,
+        pricingResolver: CostUsagePricing.ClaudeResolver)
+    {
+        let cutoff = CostUsagePricing.claudeFullContextStandardPricingCutoff
+        let cutoffMs = Int64((cutoff.timeIntervalSince1970 * 1000).rounded())
+        var prices: [ClaudeStoreModelPrice] = []
+
+        for key in store.syncReadClaudeEventModelKeys() {
+            let historical = pricingResolver.pricing(model: key.model, pricingDate: .distantPast)
+            guard let current = pricingResolver.pricing(model: key.model, pricingDate: cutoff)
+            else { continue }
+            let hasEarlierWindow = historical != nil && historical != current
+            if hasEarlierWindow, let historical {
+                prices.append(Self.claudeModelPrice(
+                    key: key,
+                    pricing: historical,
+                    window: (from: Int64.min, to: cutoffMs)))
+            }
+            prices.append(Self.claudeModelPrice(
+                key: key,
+                pricing: current,
+                window: (from: hasEarlierWindow ? cutoffMs : Int64.min, to: nil)))
+        }
+
+        _ = store.syncReplaceClaudeModelPrices(prices)
+    }
+
+    private static func claudeModelPrice(
+        key: ClaudeStoreModelKey,
+        pricing: CostUsagePricing.ClaudePricing,
+        window: (from: Int64, to: Int64?)) -> ClaudeStoreModelPrice
+    {
+        ClaudeStoreModelPrice(
+            model: key.model,
+            backend: key.backend,
+            validFromMs: window.from,
+            validToMs: window.to,
+            inputPerToken: pricing.inputCostPerToken,
+            cacheReadPerToken: pricing.cacheReadInputCostPerToken,
+            cacheWritePerToken: pricing.cacheCreationInputCostPerToken,
+            outputPerToken: pricing.outputCostPerToken,
+            longContextThreshold: pricing.thresholdTokens,
+            longContextInputPerToken: pricing.inputCostPerTokenAboveThreshold,
+            longContextCacheReadPerToken: pricing.cacheReadInputCostPerTokenAboveThreshold,
+            longContextCacheWritePerToken: pricing.cacheCreationInputCostPerTokenAboveThreshold,
+            longContextOutputPerToken: pricing.outputCostPerTokenAboveThreshold)
     }
 
     /// Backend allow-list as stored `backend` values; `nil` when the scope admits everything.
@@ -920,31 +982,58 @@ extension CostUsageScanner {
     /// Report rows from the in-memory cache, for the scans the store may not answer for.
     ///
     /// Only a filtered scan takes this path: it parses a partial row set, so the store is
-    /// deliberately left untouched and cannot be read back.
+    /// deliberately left untouched and cannot be read back. Pricing mirrors `claude_event_costs`,
+    /// including its precedence: a row priced to exactly zero at ingest stays zero.
     private static func claudeReportRows(
         cache: CostUsageCache,
         backendScope: ClaudeLogProviderFilter,
-        range: CostUsageDayRange) -> [ClaudeStoreReportRow]
+        range: CostUsageDayRange,
+        pricingResolver: CostUsagePricing.ClaudeResolver) -> [ClaudeStoreReportRow]
     {
-        self.reconciledClaudeRows(cache: cache).compactMap { row in
+        let costScale = 1_000_000_000.0
+        return self.reconciledClaudeRows(cache: cache).compactMap { row in
             guard backendScope.allows(row.backend ?? .firstParty) else { return nil }
             guard CostUsageDayRange.isInRange(
                 dayKey: row.dayKey,
                 since: range.sinceKey,
                 until: range.untilKey)
             else { return nil }
+            let ingestPriced = row.costPriced ?? (row.costNanos > 0)
+            let catalogCost = self.pricingResolverCost(row: row, resolver: pricingResolver)
+            let cost: Double? = if ingestPriced, row.costNanos == 0 {
+                0
+            } else if let catalogCost {
+                catalogCost
+            } else if ingestPriced {
+                Double(row.costNanos) / costScale
+            } else {
+                nil
+            }
             return ClaudeStoreReportRow(
                 day: row.dayKey,
                 model: row.model,
-                timestampUnixMs: row.timestampUnixMs,
                 input: row.input,
                 cacheRead: row.cacheRead,
                 cacheCreate: row.cacheCreate,
-                cacheCreate1h: row.cacheCreate1h ?? 0,
                 output: row.output,
-                ingestCostNanos: row.costNanos,
-                ingestCostPriced: row.costPriced ?? (row.costNanos > 0))
+                costUSD: cost)
         }
+    }
+
+    private static func pricingResolverCost(
+        row: ClaudeUsageRow,
+        resolver: CostUsagePricing.ClaudeResolver) -> Double?
+    {
+        resolver.costUSD(
+            model: row.model,
+            inputTokens: row.input,
+            cacheReadInputTokens: row.cacheRead,
+            cacheCreationInputTokens: row.cacheCreate,
+            cacheCreationInputTokens1h: row.cacheCreate1h ?? 0,
+            outputTokens: row.output,
+            pricingDate: row.timestampUnixMs.map {
+                Date(timeIntervalSince1970: Double($0) / 1000)
+            })
     }
 
     /// Total order over report rows, used only to make the cost summation source-independent.
@@ -954,31 +1043,26 @@ extension CostUsageScanner {
     {
         if lhs.day != rhs.day { return lhs.day < rhs.day }
         if lhs.model != rhs.model { return lhs.model < rhs.model }
-        let lhsTimestamp = lhs.timestampUnixMs ?? .min
-        let rhsTimestamp = rhs.timestampUnixMs ?? .min
-        if lhsTimestamp != rhsTimestamp { return lhsTimestamp < rhsTimestamp }
         if lhs.input != rhs.input { return lhs.input < rhs.input }
         if lhs.cacheRead != rhs.cacheRead { return lhs.cacheRead < rhs.cacheRead }
         if lhs.cacheCreate != rhs.cacheCreate { return lhs.cacheCreate < rhs.cacheCreate }
-        if lhs.cacheCreate1h != rhs.cacheCreate1h { return lhs.cacheCreate1h < rhs.cacheCreate1h }
         if lhs.output != rhs.output { return lhs.output < rhs.output }
-        if lhs.ingestCostNanos != rhs.ingestCostNanos { return lhs.ingestCostNanos < rhs.ingestCostNanos }
-        return !lhs.ingestCostPriced && rhs.ingestCostPriced
+        switch (lhs.costUSD, rhs.costUSD) {
+        case let (lhsCost?, rhsCost?): return lhsCost < rhsCost
+        case (nil, _?): return true
+        default: return false
+        }
     }
 
-    /// Buckets reconciled rows into the day×model report, repricing each row against the catalog.
+    /// Buckets already-priced rows into the day×model report.
     ///
-    /// Repricing is per row and never per aggregate: long-context tiers are chosen from one
-    /// request's own token count, so summing first would price large days at the wrong tier.
+    /// Pricing is per event and never per aggregate: long-context tiers are chosen from one
+    /// request's own token count, so summing tokens first would price large days at the wrong tier.
     private static func buildClaudeReport(
         rows: [ClaudeStoreReportRow],
-        range: CostUsageDayRange,
-        pricingResolver: CostUsagePricing.ClaudeResolver) -> CostUsageDailyReport
+        range: CostUsageDayRange) -> CostUsageDailyReport
     {
         guard !rows.isEmpty else { return CostUsageDailyReport(data: [], summary: nil) }
-        pricingResolver.prepareCatalog()
-
-        let costScale = 1_000_000_000.0
         var totals: [ClaudeDayModelKey: ClaudeDayModelTotals] = [:]
 
         // Per-row costs are `Double`s, so the same rows summed in a different order can differ in
@@ -994,27 +1078,7 @@ extension CostUsageScanner {
             aggregate.cacheRead += row.cacheRead
             aggregate.cacheCreate += row.cacheCreate
             aggregate.output += row.output
-
-            let currentPricingCost = pricingResolver.costUSD(
-                model: row.model,
-                inputTokens: row.input,
-                cacheReadInputTokens: row.cacheRead,
-                cacheCreationInputTokens: row.cacheCreate,
-                cacheCreationInputTokens1h: row.cacheCreate1h,
-                outputTokens: row.output,
-                pricingDate: row.timestampUnixMs.map {
-                    Date(timeIntervalSince1970: Double($0) / 1000)
-                })
-            let cost: Double? = if row.ingestCostPriced, row.ingestCostNanos == 0 {
-                0
-            } else if let currentPricingCost {
-                currentPricingCost
-            } else if row.ingestCostPriced {
-                Double(row.ingestCostNanos) / costScale
-            } else {
-                nil
-            }
-            if let cost {
+            if let cost = row.costUSD {
                 aggregate.cost += cost
             } else {
                 aggregate.unresolved = true
