@@ -242,4 +242,58 @@ extension CostUsageStore {
         Self.bind(event.ingestCostPriced ? Int64(1) : Int64(0), to: statement, at: 26)
         try Self.stepDone(statement, database: database)
     }
+
+    /// Every usage event after cross-file reconciliation.
+    ///
+    /// Ranking lives in `claude_reconciled_events` and mirrors `claudeRowWins`. It orders on
+    /// `path_sort_key`, never on `path`: SQLite compares UTF-8 bytes while Swift's `String <` is
+    /// canonical-equivalence aware, and APFS stores filenames decomposed, so the two invert on a
+    /// non-ASCII path.
+    func readReconciledClaudeEvents() -> [ClaudeStoreReconciledEvent] {
+        self.withDatabase(default: []) { database in
+            let statement = try Self.prepare(database, """
+            SELECT source_path, row_index, ts_ms, day, backend, model, raw_model, session_id,
+                   message_id, request_id, cwd, git_branch, path_role, is_sidechain, effort,
+                   service_tier, input, cache_read, cache_create, cache_create_1h, output,
+                   thinking_tokens, web_search_reqs, web_fetch_reqs, ingest_cost_nanos,
+                   ingest_cost_priced
+            FROM claude_reconciled_events
+            ORDER BY day, source_path, row_index
+            """)
+            defer { sqlite3_finalize(statement) }
+            var rows: [ClaudeStoreReconciledEvent] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                rows.append(ClaudeStoreReconciledEvent(
+                    sourcePath: Self.columnText(statement, at: 0) ?? "",
+                    event: ClaudeStoreUsageEvent(
+                        rowIndex: Int(sqlite3_column_int64(statement, 1)),
+                        timestampUnixMs: sqlite3_column_type(statement, 2) == SQLITE_NULL
+                            ? nil : sqlite3_column_int64(statement, 2),
+                        day: Self.columnText(statement, at: 3) ?? "",
+                        backend: Self.columnText(statement, at: 4) ?? "",
+                        model: Self.columnText(statement, at: 5) ?? "",
+                        rawModel: Self.columnText(statement, at: 6) ?? "",
+                        sessionID: Self.columnText(statement, at: 7),
+                        messageID: Self.columnText(statement, at: 8),
+                        requestID: Self.columnText(statement, at: 9),
+                        cwd: Self.columnText(statement, at: 10),
+                        gitBranch: Self.columnText(statement, at: 11),
+                        pathRole: Self.columnText(statement, at: 12) ?? "",
+                        isSidechain: sqlite3_column_int64(statement, 13) != 0,
+                        effort: Self.columnText(statement, at: 14),
+                        serviceTier: Self.columnText(statement, at: 15),
+                        input: Int(sqlite3_column_int64(statement, 16)),
+                        cacheRead: Int(sqlite3_column_int64(statement, 17)),
+                        cacheCreate: Int(sqlite3_column_int64(statement, 18)),
+                        cacheCreate1h: Int(sqlite3_column_int64(statement, 19)),
+                        output: Int(sqlite3_column_int64(statement, 20)),
+                        thinkingTokens: Int(sqlite3_column_int64(statement, 21)),
+                        webSearchRequests: Int(sqlite3_column_int64(statement, 22)),
+                        webFetchRequests: Int(sqlite3_column_int64(statement, 23)),
+                        ingestCostNanos: Int(sqlite3_column_int64(statement, 24)),
+                        ingestCostPriced: sqlite3_column_int64(statement, 25) != 0)))
+            }
+            return rows
+        }
+    }
 }

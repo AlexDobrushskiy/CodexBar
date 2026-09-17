@@ -608,8 +608,8 @@ extension CostUsageStore {
             }
             try Self.validateDatabaseIntegrity(database, recorder: self.scopedReadWorkRecorderForTesting)
             if lockedState.canMigrateSchema {
-                let storedBase = Self.baseVersion(
-                    of: try Self.scalarInt(database, "PRAGMA user_version"))
+                let storedBase = try Self.baseVersion(
+                    of: Self.scalarInt(database, "PRAGMA user_version"))
                 try self.migrateSchemaForward(database, storedBase: storedBase)
             } else if lockedState.canAdoptPredecessor {
                 try self.adoptCompatiblePredecessor(database, storedHash: lockedState.storedHash)
@@ -834,6 +834,29 @@ extension CostUsageStore {
         long_context_output_per_mtok REAL,
         PRIMARY KEY(model, backend, valid_from)
     );
+    CREATE VIEW claude_reconciled_events AS
+    SELECT f.path AS source_path, e.*
+    FROM claude_usage_events e
+    JOIN claude_source_files f ON f.id = e.file_id
+    WHERE e.message_id IS NULL OR e.request_id IS NULL
+    UNION ALL
+    SELECT source_path, file_id, row_index, ts_ms, day, backend, model, raw_model, session_id,
+           message_id, request_id, cwd, git_branch, path_role, is_sidechain, effort, service_tier,
+           input, cache_read, cache_create, cache_create_1h, output, thinking_tokens,
+           web_search_reqs, web_fetch_reqs, ingest_cost_nanos, ingest_cost_priced
+    FROM (
+        SELECT f.path AS source_path, e.*,
+               ROW_NUMBER() OVER (
+                   PARTITION BY e.backend, e.message_id, e.request_id
+                   ORDER BY e.is_sidechain ASC,
+                            CASE e.path_role WHEN 'subagent' THEN 1 ELSE 0 END ASC,
+                            f.path_sort_key ASC
+               ) AS rank_in_group
+        FROM claude_usage_events e
+        JOIN claude_source_files f ON f.id = e.file_id
+        WHERE e.message_id IS NOT NULL AND e.request_id IS NOT NULL
+    )
+    WHERE rank_in_group = 1;
     """
 
     private static let schemaSQL = """

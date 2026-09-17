@@ -12,16 +12,18 @@ struct ClaudeUsageStoreMigrationTests {
     private static let parserHash = CodexParserHash.value
 
     private static func version(base: Int) -> Int32 {
-        CostUsageStore.combinedSchemaVersion(base: base, parserHash: Self.parserHash)
+        CostUsageStore.combinedSchemaVersion(base: base, parserHash: self.parserHash)
     }
 
-    /// A database written by today's code already carries the Claude tables, so drop them to
-    /// reproduce a genuine v3 database as shipped before this migration existed.
+    /// A database written by today's code already carries every Claude object, so drop all of them
+    /// to reproduce a genuine v3 database as shipped before this migration existed. The view counts:
+    /// leaving it behind makes the migration's exact `CREATE VIEW` collide and roll back.
     private static func makeGenuinelyV3(at url: URL) {
         var handle: OpaquePointer?
         #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
         defer { sqlite3_close_v2(handle) }
-        let drops = "DROP TABLE IF EXISTS claude_usage_events;"
+        let drops = "DROP VIEW IF EXISTS claude_reconciled_events;"
+            + "DROP TABLE IF EXISTS claude_usage_events;"
             + "DROP TABLE IF EXISTS claude_source_files;"
             + "DROP TABLE IF EXISTS claude_model_prices;"
         #expect(sqlite3_exec(handle, drops, nil, nil, nil) == SQLITE_OK)

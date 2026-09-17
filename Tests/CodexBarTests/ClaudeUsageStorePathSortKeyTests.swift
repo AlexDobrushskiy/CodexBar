@@ -9,7 +9,9 @@ import Testing
 /// disagree. Every row therefore carries a sort key whose byte order reproduces Swift's ordering.
 struct ClaudeUsageStorePathSortKeyTests {
     private static func byteLess(_ lhs: [UInt8], _ rhs: [UInt8]) -> Bool {
-        for (a, b) in zip(lhs, rhs) where a != b { return a < b }
+        for (a, b) in zip(lhs, rhs) where a != b {
+            return a < b
+        }
         return lhs.count < rhs.count
     }
 

@@ -306,3 +306,39 @@ struct ClaudeStoreUsageEvent: Codable, Equatable, Sendable {
     var ingestCostNanos: Int
     var ingestCostPriced: Bool
 }
+
+/// One Claude usage event after cross-file reconciliation, carrying the transcript it won from.
+struct ClaudeStoreReconciledEvent: Codable, Equatable, Sendable {
+    var sourcePath: String
+    var event: ClaudeStoreUsageEvent
+}
+
+extension ClaudeStoreReconciledEvent {
+    var messageID: String? {
+        self.event.messageID
+    }
+
+    var output: Int {
+        self.event.output
+    }
+
+    var pathRole: String {
+        self.event.pathRole
+    }
+
+    var isSidechain: Bool {
+        self.event.isSidechain
+    }
+
+    var day: String {
+        self.event.day
+    }
+
+    var backend: String {
+        self.event.backend
+    }
+
+    var model: String {
+        self.event.model
+    }
+}
