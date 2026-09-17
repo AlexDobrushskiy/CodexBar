@@ -8,6 +8,10 @@ read_when:
 
 # AWS Bedrock provider
 
+> Bedrock-billed Claude Code traffic also produces a **local** ledger read from transcripts,
+> which needs no AWS credentials and is independent of the Cost Explorer/CloudWatch reads
+> described here. See [`claude-usage-store.md`](claude-usage-store.md).
+
 CodexBar reads AWS Cost Explorer for Bedrock spend and can compare the current month against an optional budget. When
 permitted, it also reads CloudWatch for rolling 14-day Claude token and request totals in the configured region.
 

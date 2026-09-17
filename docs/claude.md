@@ -9,6 +9,10 @@ read_when:
 
 # Claude provider
 
+> Backend attribution (first-party vs Vertex vs Bedrock) and the SQLite usage store that
+> supersedes the day×model JSON artifact are documented in
+> [`claude-usage-store.md`](claude-usage-store.md).
+
 Claude supports three usage data paths plus local cost usage. The main provider pipeline uses runtime-specific
 automatic selection, but the codebase still has multiple active Claude `.auto` decision sites while the refactor is
 pending. For the exact current-state parity contract, see

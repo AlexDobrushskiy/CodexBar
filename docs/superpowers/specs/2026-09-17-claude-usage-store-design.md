@@ -1,3 +1,10 @@
+---
+summary: "Design for the Claude usage store: v4 schema, v3 to v4 migration, reconciliation, and pricing contracts."
+read_when:
+  - Implementing or reviewing the Claude usage store
+  - Questioning a schema, reconciliation, or migration decision and its rationale
+---
+
 # Claude usage store (#2760 migration) — design
 
 Branch `claude-usage-store` off `claude-bedrock-ledger`, Alex's fork only, not upstreamed.
