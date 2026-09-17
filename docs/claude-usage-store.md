@@ -220,8 +220,24 @@ fully covered yet.
 Landed: the schema and migrations, event storage, the reconciliation view, the parser detail fields,
 the scan→store mirror, the unified read path — Claude, Vertex and Bedrock reports are now built from
 the store — the price catalog with its cost view, which every report now reads its costs from, and
-the concurrency, retention, coverage, time-zone and re-stat invariants above. Verified against a real vault — 1,921 transcripts and 55,921 events, with the Codex
-ledger preserved across the migration.
+the concurrency, retention, coverage, time-zone and re-stat invariants above.
+
+### Verified against the real vault
+
+A live v3 database (613 Codex files, 13,543 usage rows, no Claude tables) migrated straight to v5
+and kept every Codex row. One unfiltered scan then stored 1,941 transcripts and 146,101 events, and
+both ledgers were read back out of it.
+
+`Scripts/claude_usage_store_oracle.py` is the oracle: it re-reads the transcripts, redoes both
+reconciliation stages and sums the tokens itself, touching no CodexBar code, because the app's own
+numbers cannot be their own oracle. Run immediately after a refresh it agreed exactly — 146,101 rows
+and 23,494,953,194 tokens on both sides, with all 29 days matching. Its one deliberate
+simplification is that it does not reproduce the recursive Vertex metadata walk, so the 3,034,110
+tokens the app attributes to Vertex land in its first-party column and cancel exactly.
+
+The Bedrock ledger reported 12,055,913,128 tokens and $15,300.566024449987 — identical to what the
+previous filtered-scan artifact held, so neither the read-path unification nor moving pricing into a
+view changed a real number.
 
 Not yet landed: backend-aware pricing (Bedrock rows still price against the first-party catalog
 even though models.dev carries an `amazon-bedrock` provider) and retirement of the
