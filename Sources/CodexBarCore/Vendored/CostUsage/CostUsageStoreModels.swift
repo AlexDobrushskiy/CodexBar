@@ -342,3 +342,20 @@ extension ClaudeStoreReconciledEvent {
         self.event.model
     }
 }
+
+/// The columns a Claude ledger report needs, read straight out of the reconciliation view.
+///
+/// Deliberately narrower than `ClaudeStoreUsageEvent`: a 30-day window is tens of thousands of
+/// rows, and the report only reprices and buckets them.
+struct ClaudeStoreReportRow: Equatable, Sendable {
+    var day: String
+    var model: String
+    var timestampUnixMs: Int64?
+    var input: Int
+    var cacheRead: Int
+    var cacheCreate: Int
+    var cacheCreate1h: Int
+    var output: Int
+    var ingestCostNanos: Int
+    var ingestCostPriced: Bool
+}

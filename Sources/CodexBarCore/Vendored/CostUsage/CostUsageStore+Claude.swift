@@ -76,6 +76,16 @@ extension CostUsageStore {
         }
     }
 
+    /// Half-open byte range covering every path under `root`.
+    ///
+    /// SQLite compares TEXT as UTF-8 bytes, and `/` is 0x2F, so the upper bound is the same prefix
+    /// with `0` (0x30) in place of the trailing separator. A `LIKE` would have to escape `%` and `_`
+    /// that a real directory name may contain.
+    static func claudeRootPrefixBounds(_ root: String) -> (lower: String, upper: String) {
+        let trimmed = root.hasSuffix("/") ? String(root.dropLast()) : root
+        return (lower: trimmed + "/", upper: trimmed + "0")
+    }
+
     private static func claudeSourceFileID(_ database: OpaquePointer, path: String) throws -> Int64? {
         let statement = try Self.prepare(database, "SELECT id FROM claude_source_files WHERE path = ?")
         defer { sqlite3_finalize(statement) }
@@ -297,6 +307,71 @@ extension CostUsageStore {
         }
     }
 
+    /// Reconciled rows for one ledger's report: a day window, a set of backends, a set of roots.
+    ///
+    /// This is the read path the ledger split runs on. Scoping here rather than re-scanning with a
+    /// row filter is what lets one unfiltered scan serve Claude, Vertex and Bedrock at once.
+    /// `backends` holds `ClaudeLogBackend.rawValue`s; `nil` means every backend. `roots` keeps a
+    /// profile-scoped ledger from reporting transcripts its own scan never walked — the store is
+    /// global, a ledger is not.
+    func readClaudeReportRows(
+        backends: Set<String>?,
+        roots: [String],
+        sinceDay: String,
+        untilDay: String) -> [ClaudeStoreReportRow]
+    {
+        // A ledger with no roots covers nothing. Falling through would report the whole store,
+        // which is every profile's usage.
+        guard !roots.isEmpty else { return [] }
+        return self.withDatabase(default: []) { database in
+            let sortedBackends = backends.map { $0.sorted() }
+            let backendClause = sortedBackends.map {
+                " AND backend IN (\(Array(repeating: "?", count: $0.count).joined(separator: ",")))"
+            } ?? ""
+            let rootBounds = roots.map { Self.claudeRootPrefixBounds($0) }
+            let rootClause = rootBounds.isEmpty
+                ? ""
+                : " AND (" + rootBounds
+                .map { _ in "(source_path >= ? AND source_path < ?)" }
+                .joined(separator: " OR ") + ")"
+            let statement = try Self.prepare(database, """
+            SELECT day, model, ts_ms, input, cache_read, cache_create, cache_create_1h, output,
+                   ingest_cost_nanos, ingest_cost_priced
+            FROM claude_reconciled_events
+            WHERE day >= ? AND day <= ?\(backendClause)\(rootClause)
+            """)
+            defer { sqlite3_finalize(statement) }
+            Self.bind(sinceDay, to: statement, at: 1)
+            Self.bind(untilDay, to: statement, at: 2)
+            var index = Int32(3)
+            for backend in sortedBackends ?? [] {
+                Self.bind(backend, to: statement, at: index)
+                index += 1
+            }
+            for bounds in rootBounds {
+                Self.bind(bounds.lower, to: statement, at: index)
+                Self.bind(bounds.upper, to: statement, at: index + 1)
+                index += 2
+            }
+            var rows: [ClaudeStoreReportRow] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                rows.append(ClaudeStoreReportRow(
+                    day: Self.columnText(statement, at: 0) ?? "",
+                    model: Self.columnText(statement, at: 1) ?? "",
+                    timestampUnixMs: sqlite3_column_type(statement, 2) == SQLITE_NULL
+                        ? nil : sqlite3_column_int64(statement, 2),
+                    input: Int(sqlite3_column_int64(statement, 3)),
+                    cacheRead: Int(sqlite3_column_int64(statement, 4)),
+                    cacheCreate: Int(sqlite3_column_int64(statement, 5)),
+                    cacheCreate1h: Int(sqlite3_column_int64(statement, 6)),
+                    output: Int(sqlite3_column_int64(statement, 7)),
+                    ingestCostNanos: Int(sqlite3_column_int64(statement, 8)),
+                    ingestCostPriced: sqlite3_column_int64(statement, 9) != 0))
+            }
+            return rows
+        }
+    }
+
     /// Total tokens per working directory per backend, over reconciled events.
     ///
     /// The question the day×model JSON artifact structurally could not answer.
@@ -342,6 +417,21 @@ extension CostUsageStore {
 
     nonisolated func syncReadClaudeSourceFiles() -> [ClaudeStoreSourceFile] {
         self.syncWithStoreIsolation { $0.readClaudeSourceFiles() }
+    }
+
+    nonisolated func syncReadClaudeReportRows(
+        backends: Set<String>?,
+        roots: [String],
+        sinceDay: String,
+        untilDay: String) -> [ClaudeStoreReportRow]
+    {
+        self.syncWithStoreIsolation {
+            $0.readClaudeReportRows(
+                backends: backends,
+                roots: roots,
+                sinceDay: sinceDay,
+                untilDay: untilDay)
+        }
     }
 
     nonisolated func syncDeleteClaudeSourceFile(path: String) -> Bool {

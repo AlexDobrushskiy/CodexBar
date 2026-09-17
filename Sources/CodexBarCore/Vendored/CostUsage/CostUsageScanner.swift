@@ -216,6 +216,12 @@ enum CostUsageScanner {
         var calendar: Calendar
         var refreshMinIntervalSeconds: TimeInterval = 60
         var claudeLogProviderFilter: ClaudeLogProviderFilter = .all
+        /// Backends this ledger's report covers, independent of which rows the scan parsed.
+        ///
+        /// One unfiltered scan feeds every Claude ledger and the split is a `WHERE` over the stored
+        /// `backend` column, so scanning and reporting are no longer the same knob. `nil` means the
+        /// provider picks its own default.
+        var claudeBackendScope: ClaudeLogProviderFilter?
         /// Force a full rescan, ignoring per-file cache and incremental offsets.
         var forceRescan: Bool = false
         /// Maximum bounded slice read from one Codex rollout per refresh. Larger files
@@ -2069,28 +2075,24 @@ enum CostUsageScanner {
                 options: options,
                 checkCancellation: checkCancellation)
         case .vertexai:
-            var filtered = options
-            if filtered.claudeLogProviderFilter == .all {
-                filtered.claudeLogProviderFilter = .vertexAIOnly
-            }
+            var scoped = options
+            scoped.claudeBackendScope = options.claudeBackendScope ?? .vertexAIOnly
             return try self.loadClaudeDaily(
                 provider: .vertexai,
                 range: range,
                 now: now,
-                options: filtered,
+                options: scoped,
                 checkCancellation: checkCancellation)
         case .bedrock:
             // Bedrock-billed Claude Code traffic lands in the same transcripts as first-party
             // traffic; the row's own backend marker separates the ledgers, not the config root.
-            var filtered = options
-            if filtered.claudeLogProviderFilter == .all {
-                filtered.claudeLogProviderFilter = .bedrockOnly
-            }
+            var scoped = options
+            scoped.claudeBackendScope = options.claudeBackendScope ?? .bedrockOnly
             return try self.loadClaudeDaily(
                 provider: .bedrock,
                 range: range,
                 now: now,
-                options: filtered,
+                options: scoped,
                 checkCancellation: checkCancellation)
         default:
             return emptyReport

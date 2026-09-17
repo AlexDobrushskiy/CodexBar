@@ -18,10 +18,20 @@ extension CostUsageScanner {
         let model: String
     }
 
-    private struct ClaudeRepricedCost {
-        var total: Double = 0
-        var sampleCount: Int = 0
+    /// One day×model bucket while a report is being built.
+    private struct ClaudeDayModelTotals {
+        var input = 0
+        var cacheRead = 0
+        var cacheCreate = 0
+        var output = 0
+        var cost: Double = 0
+        /// At least one row in the bucket could be priced neither now nor at ingest, so the
+        /// bucket's cost is a partial sum and must not be shown as the bucket's cost.
         var unresolved = false
+
+        var totalTokens: Int {
+            self.input + self.cacheRead + self.cacheCreate + self.output
+        }
     }
 
     static func defaultClaudeProjectsRoots(
@@ -690,6 +700,10 @@ extension CostUsageScanner {
         checkCancellation: CancellationCheck?) throws -> CostUsageDailyReport
     {
         let roots = self.defaultClaudeProjectsRoots(options: options)
+        // Every path form a transcript under these roots can be stored as. A root that has gone
+        // missing still belongs to this ledger, so its rows are swept rather than left to be
+        // reported forever; roots outside it belong to another profile and are never touched.
+        let ledgerRoots = roots.flatMap { Self.claudeRootCandidates(for: $0.standardizedFileURL.path) }
         let inventory = try Self.inventoryClaudeRoots(roots, checkCancellation: checkCancellation)
         try checkCancellation?()
 
@@ -698,9 +712,10 @@ extension CostUsageScanner {
         let cacheArtifactStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
         let pricingURL = ModelsDevCache.cacheFileURL(cacheRoot: options.cacheRoot)
         let pricingArtifactStamp = CostUsageClaudeFileStamp.read(at: pricingURL)
+        let backendScope = options.claudeBackendScope ?? .all
         let reportKey = Self.claudeReportMemoKey(
             provider: provider,
-            providerFilter: options.claudeLogProviderFilter,
+            scope: (scan: options.claudeLogProviderFilter, backend: backendScope),
             range: range,
             roots: roots,
             artifactStamps: (cache: cacheArtifactStamp, pricing: pricingArtifactStamp))
@@ -795,12 +810,6 @@ extension CostUsageScanner {
             cache.lastScanUnixMs = nowMs
         }
 
-        let report = Self.buildClaudeReportFromCache(
-            cache: cache,
-            range: range,
-            pricingResolver: pricingResolver)
-        try checkCancellation?()
-
         artifact.usage = cache
         let committedCacheStamp: CostUsageClaudeFileStamp? = if shouldMutateCache {
             try CostUsageClaudeCacheIO.save(
@@ -813,22 +822,22 @@ extension CostUsageScanner {
             nil
         }
 
-        // Only an unfiltered scan may write: a provider-scoped scan parses just the rows its filter
-        // admits, and because the mirror replaces a file's events, storing one would let a later
-        // scan for another backend swap the rows out. The store holds every backend; the ledger
-        // split is a `WHERE` clause over `backend`.
-        if shouldMutateCache, options.claudeLogProviderFilter == .all {
-            Self.mirrorClaudeCacheIntoStore(
+        let report = Self.buildClaudeReport(
+            rows: Self.claudeLedgerReportRows(
                 cache: cache,
-                cacheRoot: options.cacheRoot,
-                calendar: range.calendar)
-        }
+                sourceFileIDs: artifact.sourceFileIDs,
+                scope: (backend: backendScope, roots: ledgerRoots),
+                range: range,
+                options: options),
+            range: range,
+            pricingResolver: pricingResolver)
+        try checkCancellation?()
 
         let finalCacheArtifactStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
         let finalPricingArtifactStamp = CostUsageClaudeFileStamp.read(at: pricingURL)
         let finalReportKey = Self.claudeReportMemoKey(
             provider: provider,
-            providerFilter: providerFilter,
+            scope: (scan: providerFilter, backend: backendScope),
             range: range,
             roots: roots,
             artifactStamps: (cache: finalCacheArtifactStamp, pricing: finalPricingArtifactStamp))
@@ -850,7 +859,7 @@ extension CostUsageScanner {
 
     private static func claudeReportMemoKey(
         provider: UsageProvider,
-        providerFilter: ClaudeLogProviderFilter,
+        scope: (scan: ClaudeLogProviderFilter, backend: ClaudeLogProviderFilter),
         range: CostUsageDayRange,
         roots: [URL],
         artifactStamps: (cache: CostUsageClaudeFileStamp?, pricing: CostUsageClaudeFileStamp?))
@@ -858,7 +867,8 @@ extension CostUsageScanner {
     {
         CostUsageClaudeReportMemoKey(
             provider: provider,
-            providerFilter: providerFilter.cacheKey,
+            // Scan scope and report scope are separate knobs now, and a memo hit must match both.
+            providerFilter: "\(scope.scan.cacheKey)|\(scope.backend.cacheKey)",
             sinceKey: range.sinceKey,
             untilKey: range.untilKey,
             scanSinceKey: range.scanSinceKey,
@@ -869,115 +879,186 @@ extension CostUsageScanner {
             pricingArtifactStamp: artifactStamps.pricing)
     }
 
-    private static func buildClaudeReportFromCache(
+    /// Rows this ledger reports, taken from the store whenever the store is allowed to hold them.
+    ///
+    /// Only an unfiltered scan may write: a provider-scoped scan parses just the rows its filter
+    /// admits, and because the mirror replaces a file's events, storing one would let a later scan
+    /// for another backend swap the rows out. The store holds every backend; the ledger split is a
+    /// `WHERE` clause over `backend`.
+    private static func claudeLedgerReportRows(
         cache: CostUsageCache,
+        sourceFileIDs: [String: String],
+        scope: (backend: ClaudeLogProviderFilter, roots: [String]),
+        range: CostUsageDayRange,
+        options: Options) -> [ClaudeStoreReportRow]
+    {
+        guard options.claudeLogProviderFilter == .all else {
+            return self.claudeReportRows(cache: cache, backendScope: scope.backend, range: range)
+        }
+        let store = CostUsageStore(cacheRoot: options.cacheRoot)
+        // Unconditional, not gated on whether this run rewrote the cache: the report is read back
+        // out of the store, so a run that reuses an untouched cache still needs it current.
+        Self.syncClaudeStore(
+            store: store,
+            cache: cache,
+            sourceFileIDs: sourceFileIDs,
+            ledgerRoots: scope.roots,
+            calendar: range.calendar)
+        return store.syncReadClaudeReportRows(
+            backends: Self.claudeBackendRawValues(scope.backend),
+            roots: scope.roots,
+            sinceDay: range.sinceKey,
+            untilDay: range.untilKey)
+    }
+
+    /// Backend allow-list as stored `backend` values; `nil` when the scope admits everything.
+    private static func claudeBackendRawValues(_ scope: ClaudeLogProviderFilter) -> Set<String>? {
+        guard scope != .all else { return nil }
+        return Set(scope.allowed.map(\.rawValue))
+    }
+
+    /// Report rows from the in-memory cache, for the scans the store may not answer for.
+    ///
+    /// Only a filtered scan takes this path: it parses a partial row set, so the store is
+    /// deliberately left untouched and cannot be read back.
+    private static func claudeReportRows(
+        cache: CostUsageCache,
+        backendScope: ClaudeLogProviderFilter,
+        range: CostUsageDayRange) -> [ClaudeStoreReportRow]
+    {
+        self.reconciledClaudeRows(cache: cache).compactMap { row in
+            guard backendScope.allows(row.backend ?? .firstParty) else { return nil }
+            guard CostUsageDayRange.isInRange(
+                dayKey: row.dayKey,
+                since: range.sinceKey,
+                until: range.untilKey)
+            else { return nil }
+            return ClaudeStoreReportRow(
+                day: row.dayKey,
+                model: row.model,
+                timestampUnixMs: row.timestampUnixMs,
+                input: row.input,
+                cacheRead: row.cacheRead,
+                cacheCreate: row.cacheCreate,
+                cacheCreate1h: row.cacheCreate1h ?? 0,
+                output: row.output,
+                ingestCostNanos: row.costNanos,
+                ingestCostPriced: row.costPriced ?? (row.costNanos > 0))
+        }
+    }
+
+    /// Total order over report rows, used only to make the cost summation source-independent.
+    private static func claudeReportRowPrecedes(
+        _ lhs: ClaudeStoreReportRow,
+        _ rhs: ClaudeStoreReportRow) -> Bool
+    {
+        if lhs.day != rhs.day { return lhs.day < rhs.day }
+        if lhs.model != rhs.model { return lhs.model < rhs.model }
+        let lhsTimestamp = lhs.timestampUnixMs ?? .min
+        let rhsTimestamp = rhs.timestampUnixMs ?? .min
+        if lhsTimestamp != rhsTimestamp { return lhsTimestamp < rhsTimestamp }
+        if lhs.input != rhs.input { return lhs.input < rhs.input }
+        if lhs.cacheRead != rhs.cacheRead { return lhs.cacheRead < rhs.cacheRead }
+        if lhs.cacheCreate != rhs.cacheCreate { return lhs.cacheCreate < rhs.cacheCreate }
+        if lhs.cacheCreate1h != rhs.cacheCreate1h { return lhs.cacheCreate1h < rhs.cacheCreate1h }
+        if lhs.output != rhs.output { return lhs.output < rhs.output }
+        if lhs.ingestCostNanos != rhs.ingestCostNanos { return lhs.ingestCostNanos < rhs.ingestCostNanos }
+        return !lhs.ingestCostPriced && rhs.ingestCostPriced
+    }
+
+    /// Buckets reconciled rows into the day×model report, repricing each row against the catalog.
+    ///
+    /// Repricing is per row and never per aggregate: long-context tiers are chosen from one
+    /// request's own token count, so summing first would price large days at the wrong tier.
+    private static func buildClaudeReport(
+        rows: [ClaudeStoreReportRow],
         range: CostUsageDayRange,
         pricingResolver: CostUsagePricing.ClaudeResolver) -> CostUsageDailyReport
     {
-        var entries: [CostUsageDailyReport.Entry] = []
-        var totalInput = 0
-        var totalOutput = 0
-        var totalCacheRead = 0
-        var totalCacheCreate = 0
-        var totalTokens = 0
-        var totalCost: Double = 0
-        var costSeen = false
-        let costScale = 1_000_000_000.0
-        var repricedCosts: [ClaudeDayModelKey: ClaudeRepricedCost] = [:]
-        let rows = Self.reconciledClaudeRows(cache: cache)
-        if !rows.isEmpty {
-            pricingResolver.prepareCatalog()
-        }
+        guard !rows.isEmpty else { return CostUsageDailyReport(data: [], summary: nil) }
+        pricingResolver.prepareCatalog()
 
-        for row in rows {
+        let costScale = 1_000_000_000.0
+        var totals: [ClaudeDayModelKey: ClaudeDayModelTotals] = [:]
+
+        // Per-row costs are `Double`s, so the same rows summed in a different order can differ in
+        // the last ulp. Two ledgers reading the same events must agree exactly, and the store
+        // returns rows in its own order, so the sum is taken in a canonical one.
+        for row in rows.sorted(by: Self.claudeReportRowPrecedes) {
             #if DEBUG
             Self.recordClaudeScanWork(.reprice)
             #endif
-            let key = ClaudeDayModelKey(day: row.dayKey, model: row.model)
-            var aggregate = repricedCosts[key] ?? ClaudeRepricedCost()
-            aggregate.sampleCount += 1
-            let isPriced = row.costPriced ?? (row.costNanos > 0)
+            let key = ClaudeDayModelKey(day: row.day, model: row.model)
+            var aggregate = totals[key] ?? ClaudeDayModelTotals()
+            aggregate.input += row.input
+            aggregate.cacheRead += row.cacheRead
+            aggregate.cacheCreate += row.cacheCreate
+            aggregate.output += row.output
+
             let currentPricingCost = pricingResolver.costUSD(
                 model: row.model,
                 inputTokens: row.input,
                 cacheReadInputTokens: row.cacheRead,
                 cacheCreationInputTokens: row.cacheCreate,
-                cacheCreationInputTokens1h: row.cacheCreate1h ?? 0,
+                cacheCreationInputTokens1h: row.cacheCreate1h,
                 outputTokens: row.output,
                 pricingDate: row.timestampUnixMs.map {
                     Date(timeIntervalSince1970: Double($0) / 1000)
                 })
-            let cost: Double? = if isPriced, row.costNanos == 0 {
+            let cost: Double? = if row.ingestCostPriced, row.ingestCostNanos == 0 {
                 0
             } else if let currentPricingCost {
                 currentPricingCost
-            } else if isPriced {
-                Double(row.costNanos) / costScale
+            } else if row.ingestCostPriced {
+                Double(row.ingestCostNanos) / costScale
             } else {
                 nil
             }
             if let cost {
-                aggregate.total += cost
+                aggregate.cost += cost
             } else {
                 aggregate.unresolved = true
             }
-            repricedCosts[key] = aggregate
+            totals[key] = aggregate
         }
 
-        let dayKeys = cache.days.keys.sorted().filter {
-            CostUsageDayRange.isInRange(dayKey: $0, since: range.sinceKey, until: range.untilKey)
-        }
+        var entries: [CostUsageDailyReport.Entry] = []
+        var summaryInput = 0
+        var summaryOutput = 0
+        var summaryCacheRead = 0
+        var summaryCacheCreate = 0
+        var summaryTokens = 0
+        var summaryCost: Double = 0
+        var summaryCostSeen = false
 
-        for day in dayKeys {
-            guard let models = cache.days[day] else { continue }
-            let modelNames = models.keys.sorted()
-
+        for day in Set(totals.keys.map(\.day)).sorted() {
+            let modelNames = totals.keys.filter { $0.day == day }.map(\.model).sorted()
             var dayInput = 0
             var dayOutput = 0
             var dayCacheRead = 0
             var dayCacheCreate = 0
-
-            var breakdown: [CostUsageDailyReport.ModelBreakdown] = []
             var dayCost: Double = 0
             var dayCostSeen = false
+            var breakdown: [CostUsageDailyReport.ModelBreakdown] = []
 
             for model in modelNames {
-                let packed = models[model] ?? [0, 0, 0, 0]
-                let input = packed[safe: 0] ?? 0
-                let cacheRead = packed[safe: 1] ?? 0
-                let cacheCreate = packed[safe: 2] ?? 0
-                let output = packed[safe: 3] ?? 0
-                let sampleCount = packed[safe: 5] ?? 0
-                let totalTokens = input + cacheRead + cacheCreate + output
+                guard let aggregate = totals[ClaudeDayModelKey(day: day, model: model)] else { continue }
+                dayInput += aggregate.input
+                dayCacheRead += aggregate.cacheRead
+                dayCacheCreate += aggregate.cacheCreate
+                dayOutput += aggregate.output
 
-                // Cache tokens are tracked separately; totalTokens includes input + cache.
-                dayInput += input
-                dayCacheRead += cacheRead
-                dayCacheCreate += cacheCreate
-                dayOutput += output
-
-                let repricedCost = repricedCosts[ClaudeDayModelKey(day: day, model: model)]
-                let currentPricingCost: Double? = if let repricedCost,
-                                                     repricedCost.sampleCount == sampleCount,
-                                                     !repricedCost.unresolved
-                {
-                    repricedCost.total
-                } else {
-                    nil
-                }
-                let cost = currentPricingCost
+                let cost: Double? = aggregate.unresolved ? nil : aggregate.cost
                 breakdown.append(
                     CostUsageDailyReport.ModelBreakdown(
                         modelName: model,
                         costUSD: cost,
-                        totalTokens: totalTokens))
+                        totalTokens: aggregate.totalTokens))
                 if let cost {
                     dayCost += cost
                     dayCostSeen = true
                 }
             }
-
-            let sortedBreakdown = Self.sortedModelBreakdowns(breakdown)
 
             let dayTotal = dayInput + dayCacheRead + dayCacheCreate + dayOutput
             let entryCost = dayCostSeen ? dayCost : nil
@@ -990,55 +1071,61 @@ extension CostUsageScanner {
                 totalTokens: dayTotal,
                 costUSD: entryCost,
                 modelsUsed: modelNames,
-                modelBreakdowns: sortedBreakdown))
+                modelBreakdowns: Self.sortedModelBreakdowns(breakdown)))
 
-            totalInput += dayInput
-            totalOutput += dayOutput
-            totalCacheRead += dayCacheRead
-            totalCacheCreate += dayCacheCreate
-            totalTokens += dayTotal
+            summaryInput += dayInput
+            summaryOutput += dayOutput
+            summaryCacheRead += dayCacheRead
+            summaryCacheCreate += dayCacheCreate
+            summaryTokens += dayTotal
             if let entryCost {
-                totalCost += entryCost
-                costSeen = true
+                summaryCost += entryCost
+                summaryCostSeen = true
             }
         }
 
         let summary: CostUsageDailyReport.Summary? = entries.isEmpty
             ? nil
             : CostUsageDailyReport.Summary(
-                totalInputTokens: totalInput,
-                totalOutputTokens: totalOutput,
-                cacheReadTokens: totalCacheRead,
-                cacheCreationTokens: totalCacheCreate,
-                totalTokens: totalTokens,
-                totalCostUSD: costSeen ? totalCost : nil)
+                totalInputTokens: summaryInput,
+                totalOutputTokens: summaryOutput,
+                cacheReadTokens: summaryCacheRead,
+                cacheCreationTokens: summaryCacheCreate,
+                totalTokens: summaryTokens,
+                totalCostUSD: summaryCostSeen ? summaryCost : nil)
 
         return CostUsageDailyReport(data: entries, summary: summary)
     }
 }
 
 extension CostUsageScanner {
-    /// Mirrors the scanned transcripts into `CostUsageStore` as per-event rows.
+    /// Brings `CostUsageStore` up to date with the scanned transcripts, as per-event rows.
     ///
     /// The JSON artifact keeps day×model totals; the store keeps the rows those totals came from,
     /// so usage stays answerable by project, session, branch and backend. Cross-file parent/subagent
     /// reconciliation is deliberately NOT applied here — every candidate is stored and the winner is
     /// chosen by `claude_reconciled_events`, so deleting a winner reveals the loser.
-    static func mirrorClaudeCacheIntoStore(
+    ///
+    /// Only files whose recorded state actually moved are rewritten, and the eviction sweep is
+    /// confined to the roots this scan walked.
+    static func syncClaudeStore(
+        store: CostUsageStore,
         cache: CostUsageCache,
-        cacheRoot: URL?,
+        sourceFileIDs: [String: String],
+        ledgerRoots: [String],
         calendar: Calendar)
     {
-        let store = CostUsageStore(cacheRoot: cacheRoot)
         let tzIdentity = calendar.timeZone.identifier
-        var seen: Set<String> = []
+        let stored = Dictionary(
+            store.syncReadClaudeSourceFiles().map { ($0.path, $0) },
+            uniquingKeysWith: { first, _ in first })
+
         for (path, usage) in cache.files {
-            seen.insert(path)
             let rows = usage.claudeRows ?? []
             let days = rows.map(\.dayKey).sorted()
             let file = ClaudeStoreSourceFile(
                 path: path,
-                fileIdentity: nil,
+                fileIdentity: sourceFileIDs[path],
                 size: usage.size,
                 mtimeMs: usage.mtimeUnixMs,
                 parsedOffset: usage.parsedBytes ?? 0,
@@ -1047,13 +1134,28 @@ extension CostUsageScanner {
                 parserRevision: Self.claudeStoreParserRevision,
                 tzIdentity: tzIdentity,
                 complete: true)
+            // Rewriting an unchanged file's events is what made a real refresh spend most of its
+            // time in the store: the cache holds every transcript, not just the ones this scan
+            // parsed. The recorded file state is the same baseline the parser skipped on.
+            guard stored[path] != file else { continue }
             let events = rows.enumerated().map { index, row in
                 Self.storeEvent(row: row, rowIndex: index)
             }
             _ = store.syncReplaceClaudeFile(file: file, events: events)
         }
-        for stored in store.syncReadClaudeSourceFiles() where !seen.contains(stored.path) {
-            _ = store.syncDeleteClaudeSourceFile(path: stored.path)
+
+        for (path, _) in stored where cache.files[path] == nil {
+            // A profile-scoped scan walks part of the vault. Evicting rows for transcripts outside
+            // the roots it inventoried would delete another ledger's usage.
+            guard Self.claudePath(path, isUnder: ledgerRoots) else { continue }
+            _ = store.syncDeleteClaudeSourceFile(path: path)
+        }
+    }
+
+    private static func claudePath(_ path: String, isUnder roots: [String]) -> Bool {
+        roots.contains { root in
+            let prefix = root.hasSuffix("/") ? root : root + "/"
+            return path.hasPrefix(prefix)
         }
     }
 

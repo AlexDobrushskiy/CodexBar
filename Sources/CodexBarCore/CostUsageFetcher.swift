@@ -672,11 +672,11 @@ public struct CostUsageFetcher: Sendable {
 
             if provider == .vertexai,
                !options.allowVertexClaudeFallback,
-               options.scanOptions.claudeLogProviderFilter == .vertexAIOnly,
+               options.scanOptions.claudeBackendScope == .vertexAIOnly,
                daily.data.isEmpty
             {
                 var fallback = options.scanOptions
-                fallback.claudeLogProviderFilter = .all
+                fallback.claudeBackendScope = .all
                 daily = try CostUsageScanner.loadDailyReportCancellable(
                     provider: provider,
                     since: since,
@@ -1459,13 +1459,16 @@ public struct CostUsageFetcher: Sendable {
         forceRefresh: Bool,
         bypassScannerDebounce: Bool)
     {
+        // Scope the ledger, not the scan: one unfiltered pass over the transcripts fills the store,
+        // and each ledger reads its own backends back out of it. Filtering the scan instead left the
+        // store empty, because a partial row set may not be persisted.
         if provider == .vertexai {
-            options.claudeLogProviderFilter = allowVertexClaudeFallback ? .all : .vertexAIOnly
+            options.claudeBackendScope = allowVertexClaudeFallback ? .all : .vertexAIOnly
         } else if provider == .bedrock {
-            options.claudeLogProviderFilter = .bedrockOnly
+            options.claudeBackendScope = .bedrockOnly
         } else if provider == .claude {
             // Anthropic first-party only: Vertex and Bedrock each own their ledger.
-            options.claudeLogProviderFilter = .firstPartyOnly
+            options.claudeBackendScope = .firstPartyOnly
         }
         if forceRefresh || bypassScannerDebounce {
             options.refreshMinIntervalSeconds = 0

@@ -144,16 +144,31 @@ events, storing a filtered scan would persist a partial row set, and a later sca
 backend would swap those rows out entirely. The store holds every backend; the ledger split is a
 `WHERE` clause over `backend`.
 
+## Scanning and reporting are separate scopes
+
+`Options.claudeLogProviderFilter` is what the **scan** parses; `Options.claudeBackendScope` is what
+the **report** covers. Production leaves the first at `.all` and sets the second per provider, so one
+unfiltered pass over the transcripts fills the store and each ledger reads its own backends back out
+of `claude_reconciled_events`. Filtering the scan instead is what kept the store empty: the gate
+above refused every provider-scoped scan.
+
+A ledger is also scoped to its own roots. The store is global, but a profile-scoped Claude scan
+(`CLAUDE_CONFIG_DIR` per profile) walks only part of the vault, so both the report read and the
+eviction sweep are bounded by that scan's configured roots. A root that has gone missing still
+belongs to the ledger and its rows are swept; roots belonging to another profile are never touched.
+
 ## Status
 
 Landed: the schema and migration, event storage, the reconciliation view, the parser detail fields,
-and the scan→store mirror. Verified against a real vault — 1,921 transcripts and 55,921 events, with
-the Codex ledger preserved across the migration.
+the scan→store mirror, and the unified read path — Claude, Vertex and Bedrock reports are now built
+from the store. Verified against a real vault — 1,921 transcripts and 55,921 events, with the Codex
+ledger preserved across the migration.
 
-Not yet landed: the Claude and Bedrock **read paths** still build reports from the filtered
-`claude-v6.json` / `bedrock-v6.json` artifacts rather than from the store, so in normal operation
-those provider-scoped scans are filtered and the mirror correctly declines to write. Until the read
-paths are unified onto one unfiltered scan plus a backend `WHERE` clause, the store stays empty
-outside tests. Pricing views and retirement of the JSON artifacts follow that.
+Not yet landed: the pricing view (`claude_model_prices` still has no writer), Claude retention in
+`retainDayWindow`, optimistic CAS on `claude_source_files`, time-zone invalidation and re-stat at
+commit, and retirement of the `claude-v6.json` / `bedrock-v6.json` artifacts, which are still the
+incremental parse state. Each provider keeps its own artifact, so the first scan after this change
+re-parses once per enabled Claude-family provider; the store write itself is skipped for files whose
+recorded state has not moved.
 
 Design notes: `docs/superpowers/specs/2026-09-17-claude-usage-store-design.md`.
