@@ -188,17 +188,44 @@ A ledger is also scoped to its own roots. The store is global, but a profile-sco
 eviction sweep are bounded by that scan's configured roots. A root that has gone missing still
 belongs to the ledger and its rows are swept; roots belonging to another profile are never touched.
 
+## Invariants the store enforces
+
+**Concurrency.** WAL serializes commits but does not stop a stale writer: A parses old file state,
+B commits an append, then A acquires the lock and overwrites B. `writeClaudeFile` therefore carries
+the baseline it parsed against — `(file_identity, size, mtime_ms, parsed_offset)` — and is rejected
+when the recorded state has moved, handing back what is actually stored. `expecting: nil` asserts
+the file is untracked, so two first writes cannot both win. The file row and its events move in one
+transaction, which is what makes a replace atomic: a rejected write must not leave a file whose
+events were already deleted.
+
+**Retention and coverage.** Nothing else bounds these tables — a real vault is ~56k events per
+30-day window, and a transcript never touched again keeps its rows forever. Every scan prunes its
+own roots to its own scan window, and `retainDayWindow` carries Claude across too. Pruning events
+while keeping EOF offsets is what would make a later, wider window look falsely complete, so
+coverage is clamped to what survived and `claudeSourceFilesNeedingReparse` names the files that can
+no longer answer for an earlier day. A file left with nothing in the window is dropped outright:
+keeping its offsets *is* the falsely-complete state.
+
+**Time zone.** `day` is local-calendar derived and therefore not timeless. `tz_identity` records the
+calendar each row was bucketed under, and because the sync compares the whole recorded file state,
+a calendar change rewrites every file's events rather than leaving them bucketed under the old one.
+
+**Re-stat at commit.** A transcript written to while it is being read is parsed only as far as it
+went. The pre-parse stamp is what gets recorded — that is what makes the next scan notice — and the
+file is stamped incomplete rather than complete. Its rows are still real; the file simply is not
+fully covered yet.
+
 ## Status
 
 Landed: the schema and migrations, event storage, the reconciliation view, the parser detail fields,
 the scan→store mirror, the unified read path — Claude, Vertex and Bedrock reports are now built from
-the store — and the price catalog with its cost view, which every report now reads its costs from. Verified against a real vault — 1,921 transcripts and 55,921 events, with the Codex
+the store — the price catalog with its cost view, which every report now reads its costs from, and
+the concurrency, retention, coverage, time-zone and re-stat invariants above. Verified against a real vault — 1,921 transcripts and 55,921 events, with the Codex
 ledger preserved across the migration.
 
-Not yet landed: Claude retention in `retainDayWindow`, optimistic CAS on `claude_source_files`,
-time-zone invalidation and re-stat at commit, backend-aware pricing (Bedrock rows still price
-against the first-party catalog even though models.dev carries `amazon-bedrock`), and retirement of
-the `claude-v6.json` / `bedrock-v6.json` artifacts, which are still the incremental parse state. Each provider keeps its own artifact, so the first scan after this change
+Not yet landed: backend-aware pricing (Bedrock rows still price against the first-party catalog
+even though models.dev carries an `amazon-bedrock` provider) and retirement of the
+`claude-v6.json` / `bedrock-v6.json` artifacts, which are still the incremental parse state. Each provider keeps its own artifact, so the first scan after this change
 re-parses once per enabled Claude-family provider; the store write itself is skipped for files whose
 recorded state has not moved.
 

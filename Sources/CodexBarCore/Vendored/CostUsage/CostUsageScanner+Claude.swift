@@ -583,12 +583,16 @@ extension CostUsageScanner {
     private final class ClaudeScanState {
         var cache: CostUsageCache
         var sourceFileIDs: [String: String]
+        /// Transcripts whose size, mtime or identity moved between the parse and its commit. Their
+        /// rows are real, but the file is not fully covered, so it must not be stamped complete.
+        var movedWhileParsingPaths: Set<String> = []
         let range: CostUsageDayRange
         let providerFilter: ClaudeLogProviderFilter
         let forceFullScan: Bool
         let changedPaths: Set<String>
         let pricingResolver: CostUsagePricing.ClaudeResolver
         let checkCancellation: CancellationCheck?
+        let didParseFileForTesting: (@Sendable (URL) -> Void)?
 
         init(
             cache: CostUsageCache,
@@ -598,7 +602,8 @@ extension CostUsageScanner {
             forceFullScan: Bool,
             changedPaths: Set<String>,
             pricingResolver: CostUsagePricing.ClaudeResolver,
-            checkCancellation: CancellationCheck?)
+            checkCancellation: CancellationCheck?,
+            didParseFileForTesting: (@Sendable (URL) -> Void)?)
         {
             self.cache = cache
             self.sourceFileIDs = sourceFileIDs
@@ -608,6 +613,7 @@ extension CostUsageScanner {
             self.changedPaths = changedPaths
             self.pricingResolver = pricingResolver
             self.checkCancellation = checkCancellation
+            self.didParseFileForTesting = didParseFileForTesting
         }
     }
 
@@ -653,6 +659,16 @@ extension CostUsageScanner {
             checkCancellation: state.checkCancellation)
         let rows = startOffset > 0 ? Self.mergeClaudeRows(existing: cached?.claudeRows ?? [], delta: parsed.rows)
             : parsed.rows
+        // Re-stat at commit: a transcript written to while it was being read is parsed only as far
+        // as it went, so recording the pre-parse stamp is what makes the next scan notice. The
+        // rows are still real; the file simply is not fully covered yet.
+        state.didParseFileForTesting?(source.url)
+        let committedStamp = CostUsageClaudeFileStamp.read(at: source.url)
+        if committedStamp != stamp {
+            state.movedWhileParsingPaths.insert(path)
+        } else {
+            state.movedWhileParsingPaths.remove(path)
+        }
         let usage = Self.makeFileUsage(
             mtimeUnixMs: stamp.mtimeUnixMs,
             size: stamp.size,
@@ -737,6 +753,7 @@ extension CostUsageScanner {
             cacheRoot: options.cacheRoot,
             calendar: range.calendar)
         var cache = artifact.usage
+        var movedWhileParsingPaths: Set<String> = []
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         let refreshMs = Int64(max(0, options.refreshMinIntervalSeconds) * 1000)
         let windowExpanded = Self.requestedWindowExpandsCache(range: range, cache: cache)
@@ -787,7 +804,8 @@ extension CostUsageScanner {
                 forceFullScan: options.forceRescan || windowExpanded || scanConfigurationChanged,
                 changedPaths: changedPaths,
                 pricingResolver: pricingResolver,
-                checkCancellation: checkCancellation)
+                checkCancellation: checkCancellation,
+                didParseFileForTesting: options.claudeDidParseFileForTesting)
 
             for path in inventory.files.keys.sorted() {
                 guard let source = inventory.files[path] else { continue }
@@ -796,6 +814,7 @@ extension CostUsageScanner {
             try checkCancellation?()
 
             cache = scanState.cache
+            movedWhileParsingPaths = scanState.movedWhileParsingPaths
             artifact.sourceFileIDs = scanState.sourceFileIDs.filter { sourceInventory[$0.key] != nil }
             cache.roots = nil
 
@@ -826,7 +845,7 @@ extension CostUsageScanner {
             rows: Self.claudeLedgerReportRows(
                 cache: cache,
                 sourceFileIDs: artifact.sourceFileIDs,
-                scope: (backend: backendScope, roots: ledgerRoots),
+                scope: (backend: backendScope, roots: ledgerRoots, incomplete: movedWhileParsingPaths),
                 range: range,
                 options: (scan: options, pricingResolver: pricingResolver)),
             range: range)
@@ -887,7 +906,7 @@ extension CostUsageScanner {
     private static func claudeLedgerReportRows(
         cache: CostUsageCache,
         sourceFileIDs: [String: String],
-        scope: (backend: ClaudeLogProviderFilter, roots: [String]),
+        scope: (backend: ClaudeLogProviderFilter, roots: [String], incomplete: Set<String>),
         range: CostUsageDayRange,
         options: (scan: Options, pricingResolver: CostUsagePricing.ClaudeResolver))
         -> [ClaudeStoreReportRow]
@@ -907,8 +926,11 @@ extension CostUsageScanner {
             store: store,
             cache: cache,
             sourceFileIDs: sourceFileIDs,
-            ledgerRoots: scope.roots,
-            calendar: range.calendar)
+            ledger: (
+                roots: scope.roots,
+                retainWindow: (since: range.scanSinceKey, until: range.scanUntilKey),
+                tzIdentity: range.calendar.timeZone.identifier),
+            incompletePaths: scope.incomplete)
         // Seed prices before reading: `claude_event_costs` joins them, and a scan that added a
         // model the catalog has would otherwise report it as unpriced until the next refresh.
         Self.seedClaudeModelPrices(store: store, pricingResolver: options.pricingResolver)
@@ -1176,10 +1198,10 @@ extension CostUsageScanner {
         store: CostUsageStore,
         cache: CostUsageCache,
         sourceFileIDs: [String: String],
-        ledgerRoots: [String],
-        calendar: Calendar)
+        ledger: (roots: [String], retainWindow: (since: String, until: String), tzIdentity: String),
+        incompletePaths: Set<String>)
     {
-        let tzIdentity = calendar.timeZone.identifier
+        let tzIdentity = ledger.tzIdentity
         let stored = Dictionary(
             store.syncReadClaudeSourceFiles().map { ($0.path, $0) },
             uniquingKeysWith: { first, _ in first })
@@ -1197,23 +1219,42 @@ extension CostUsageScanner {
                 coverageUntilDay: days.last,
                 parserRevision: Self.claudeStoreParserRevision,
                 tzIdentity: tzIdentity,
-                complete: true)
+                complete: !incompletePaths.contains(path))
             // Rewriting an unchanged file's events is what made a real refresh spend most of its
             // time in the store: the cache holds every transcript, not just the ones this scan
             // parsed. The recorded file state is the same baseline the parser skipped on.
-            guard stored[path] != file else { continue }
+            let baseline = stored[path]
+            guard baseline != file else { continue }
             let events = rows.enumerated().map { index, row in
                 Self.storeEvent(row: row, rowIndex: index)
             }
-            _ = store.syncReplaceClaudeFile(file: file, events: events)
+            // Baselines were read once, before this loop, which is exactly the stale-writer window
+            // the compare-and-set closes. A rejected write means another scan moved the file on;
+            // its state is newer than ours, so the next refresh reconciles rather than this one.
+            if case let .rejected(actual) = store.syncWriteClaudeFile(
+                file: file,
+                events: events,
+                expecting: baseline)
+            {
+                Self.log.debug(
+                    "Claude usage store write rejected; a newer scan already moved this transcript",
+                    metadata: ["storedParsedOffset": "\(actual?.parsedOffset ?? -1)"])
+            }
         }
 
         for (path, _) in stored where cache.files[path] == nil {
             // A profile-scoped scan walks part of the vault. Evicting rows for transcripts outside
             // the roots it inventoried would delete another ledger's usage.
-            guard Self.claudePath(path, isUnder: ledgerRoots) else { continue }
+            guard Self.claudePath(path, isUnder: ledger.roots) else { continue }
             _ = store.syncDeleteClaudeSourceFile(path: path)
         }
+
+        // Nothing else bounds these tables. Rows for days this scan no longer covers would
+        // otherwise accumulate for every transcript that is never touched again.
+        _ = store.syncRetainClaudeDayWindow(
+            sinceDay: ledger.retainWindow.since,
+            untilDay: ledger.retainWindow.until,
+            roots: ledger.roots)
     }
 
     private static func claudePath(_ path: String, isUnder roots: [String]) -> Bool {

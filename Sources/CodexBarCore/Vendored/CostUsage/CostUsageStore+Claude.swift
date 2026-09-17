@@ -13,40 +13,136 @@ extension CostUsageStore {
     ///
     /// The sort key is derived here rather than by the caller so there is a single ordering
     /// authority for the cross-file tie-break; see `ClaudeUsageStorePathSortKey`.
+    /// Inserts or updates one tracked transcript and returns its row id.
+    ///
+    /// Unconditional; `writeClaudeFile` is the entry point that guards against a stale writer.
     func upsertClaudeSourceFile(_ file: ClaudeStoreSourceFile) -> Int64? {
         self.withDatabase(default: nil) { database in
-            let statement = try Self.prepare(database, """
-            INSERT INTO claude_source_files(
-                path, path_sort_key, file_identity, size, mtime_ms, parsed_offset,
-                coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(path) DO UPDATE SET
-                path_sort_key = excluded.path_sort_key,
-                file_identity = excluded.file_identity,
-                size = excluded.size,
-                mtime_ms = excluded.mtime_ms,
-                parsed_offset = excluded.parsed_offset,
-                coverage_since_day = excluded.coverage_since_day,
-                coverage_until_day = excluded.coverage_until_day,
-                parser_revision = excluded.parser_revision,
-                tz_identity = excluded.tz_identity,
-                complete = excluded.complete
-            """)
-            defer { sqlite3_finalize(statement) }
-            Self.bind(file.path, to: statement, at: 1)
-            Self.bind(Data(ClaudeUsageStorePathSortKey.make(file.path)), to: statement, at: 2)
-            Self.bind(file.fileIdentity, to: statement, at: 3)
-            Self.bind(file.size, to: statement, at: 4)
-            Self.bind(file.mtimeMs, to: statement, at: 5)
-            Self.bind(file.parsedOffset, to: statement, at: 6)
-            Self.bind(file.coverageSinceDay, to: statement, at: 7)
-            Self.bind(file.coverageUntilDay, to: statement, at: 8)
-            Self.bind(Int64(file.parserRevision), to: statement, at: 9)
-            Self.bind(file.tzIdentity, to: statement, at: 10)
-            Self.bind(file.complete ? Int64(1) : Int64(0), to: statement, at: 11)
-            try Self.stepDone(statement, database: database)
+            try Self.upsertClaudeSourceFileRow(database, file: file)
             return try Self.claudeSourceFileID(database, path: file.path)
         }
+    }
+
+    /// The sort key is derived here rather than by the caller so there is a single ordering
+    /// authority for the cross-file tie-break; see `ClaudeUsageStorePathSortKey`.
+    private static func upsertClaudeSourceFileRow(
+        _ database: OpaquePointer,
+        file: ClaudeStoreSourceFile) throws
+    {
+        let statement = try Self.prepare(database, """
+        INSERT INTO claude_source_files(
+            path, path_sort_key, file_identity, size, mtime_ms, parsed_offset,
+            coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(path) DO UPDATE SET
+            path_sort_key = excluded.path_sort_key,
+            file_identity = excluded.file_identity,
+            size = excluded.size,
+            mtime_ms = excluded.mtime_ms,
+            parsed_offset = excluded.parsed_offset,
+            coverage_since_day = excluded.coverage_since_day,
+            coverage_until_day = excluded.coverage_until_day,
+            parser_revision = excluded.parser_revision,
+            tz_identity = excluded.tz_identity,
+            complete = excluded.complete
+        """)
+        defer { sqlite3_finalize(statement) }
+        Self.bind(file.path, to: statement, at: 1)
+        Self.bind(Data(ClaudeUsageStorePathSortKey.make(file.path)), to: statement, at: 2)
+        Self.bind(file.fileIdentity, to: statement, at: 3)
+        Self.bind(file.size, to: statement, at: 4)
+        Self.bind(file.mtimeMs, to: statement, at: 5)
+        Self.bind(file.parsedOffset, to: statement, at: 6)
+        Self.bind(file.coverageSinceDay, to: statement, at: 7)
+        Self.bind(file.coverageUntilDay, to: statement, at: 8)
+        Self.bind(Int64(file.parserRevision), to: statement, at: 9)
+        Self.bind(file.tzIdentity, to: statement, at: 10)
+        Self.bind(file.complete ? Int64(1) : Int64(0), to: statement, at: 11)
+        try Self.stepDone(statement, database: database)
+    }
+
+    /// Writes one transcript's state and its events together, only if the baseline still holds.
+    ///
+    /// WAL serializes commits but does not stop a stale writer: A parses old file state, B commits
+    /// an append, then A acquires the lock and overwrites B. The write therefore carries the state
+    /// it was parsed against and is rejected when the recorded state has moved, handing back what
+    /// is actually stored so the caller can reload instead of guessing.
+    ///
+    /// `expecting: nil` asserts the file is not tracked yet, so two first writes cannot both win.
+    /// File row and events move in one transaction, which is what makes `.replace` atomic: a
+    /// rejected write must not leave a file with its events already deleted.
+    func writeClaudeFile(
+        _ file: ClaudeStoreSourceFile,
+        events: [ClaudeStoreUsageEvent],
+        mode: ClaudeStoreEventWriteMode,
+        expecting baseline: ClaudeStoreSourceFile?) -> ClaudeStoreFileWrite
+    {
+        self.withDatabase(default: .rejected(nil)) { database in
+            try Self.inTransaction(database) {
+                let current = try Self.claudeSourceFile(database, path: file.path)
+                guard Self.claudeBaselineHolds(current: current, baseline: baseline) else {
+                    return ClaudeStoreFileWrite.rejected(current)
+                }
+                try Self.upsertClaudeSourceFileRow(database, file: file)
+                guard let fileID = try Self.claudeSourceFileID(database, path: file.path) else {
+                    throw StoreError.invalidData
+                }
+                if mode == .replace {
+                    let delete = try Self.prepare(
+                        database,
+                        "DELETE FROM claude_usage_events WHERE file_id = ?")
+                    defer { sqlite3_finalize(delete) }
+                    Self.bind(fileID, to: delete, at: 1)
+                    try Self.stepDone(delete, database: database)
+                }
+                for event in events {
+                    try Self.upsertClaudeUsageEvent(database, fileID: fileID, event: event)
+                }
+                return .written(fileID)
+            }
+        }
+    }
+
+    /// The baseline is the mutable file state a parse was based on, never its derived columns.
+    private static func claudeBaselineHolds(
+        current: ClaudeStoreSourceFile?,
+        baseline: ClaudeStoreSourceFile?) -> Bool
+    {
+        guard let baseline else { return current == nil }
+        guard let current else { return false }
+        return current.fileIdentity == baseline.fileIdentity
+            && current.size == baseline.size
+            && current.mtimeMs == baseline.mtimeMs
+            && current.parsedOffset == baseline.parsedOffset
+    }
+
+    private static func claudeSourceFile(
+        _ database: OpaquePointer,
+        path: String) throws -> ClaudeStoreSourceFile?
+    {
+        let statement = try Self.prepare(database, """
+        SELECT path, file_identity, size, mtime_ms, parsed_offset,
+               coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete
+        FROM claude_source_files WHERE path = ?
+        """)
+        defer { sqlite3_finalize(statement) }
+        Self.bind(path, to: statement, at: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return Self.claudeSourceFile(from: statement)
+    }
+
+    private static func claudeSourceFile(from statement: OpaquePointer) -> ClaudeStoreSourceFile {
+        ClaudeStoreSourceFile(
+            path: columnText(statement, at: 0) ?? "",
+            fileIdentity: columnText(statement, at: 1),
+            size: sqlite3_column_int64(statement, 2),
+            mtimeMs: sqlite3_column_int64(statement, 3),
+            parsedOffset: sqlite3_column_int64(statement, 4),
+            coverageSinceDay: columnText(statement, at: 5),
+            coverageUntilDay: columnText(statement, at: 6),
+            parserRevision: Int(sqlite3_column_int64(statement, 7)),
+            tzIdentity: columnText(statement, at: 8) ?? "",
+            complete: sqlite3_column_int64(statement, 9) != 0)
     }
 
     func readClaudeSourceFiles() -> [ClaudeStoreSourceFile] {
@@ -396,18 +492,18 @@ extension CostUsageStore {
 // MARK: - Synchronous bridge for the scanner
 
 extension CostUsageStore {
-    /// Mirrors one scanned transcript and its rows into the store.
+    /// Mirrors one scanned transcript and its rows into the store, if its baseline still holds.
     ///
     /// The Claude scan is synchronous, so it reaches the store through the shared executor the way
     /// the Codex scan does. Events are *replaced* rather than appended because `rows` is already the
     /// merged full set for the file, so a shrinking or rewritten transcript cannot leave stale rows.
-    nonisolated func syncReplaceClaudeFile(
+    nonisolated func syncWriteClaudeFile(
         file: ClaudeStoreSourceFile,
-        events: [ClaudeStoreUsageEvent]) -> Bool
+        events: [ClaudeStoreUsageEvent],
+        expecting baseline: ClaudeStoreSourceFile?) -> ClaudeStoreFileWrite
     {
         self.syncWithStoreIsolation { store in
-            guard let fileID = store.upsertClaudeSourceFile(file) else { return false }
-            return store.replaceClaudeUsageEvents(fileID: fileID, events: events)
+            store.writeClaudeFile(file, events: events, mode: .replace, expecting: baseline)
         }
     }
 
@@ -427,6 +523,16 @@ extension CostUsageStore {
                 roots: roots,
                 sinceDay: sinceDay,
                 untilDay: untilDay)
+        }
+    }
+
+    nonisolated func syncRetainClaudeDayWindow(
+        sinceDay: String,
+        untilDay: String,
+        roots: [String]) -> CostUsageStoreClaudeRetentionResult
+    {
+        self.syncWithStoreIsolation {
+            $0.retainClaudeDayWindow(sinceDay: sinceDay, untilDay: untilDay, roots: roots)
         }
     }
 

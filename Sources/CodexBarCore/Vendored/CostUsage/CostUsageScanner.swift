@@ -236,6 +236,10 @@ enum CostUsageScanner {
         /// Prefer newest session files first so recent usage lands before catch-up work.
         var preferNewestCodexSessionsFirst: Bool = true
         var codexScanWorkRecorderForTesting: CodexScanWorkRecorder?
+        /// Runs after a Claude transcript is parsed and before it is re-stat'd at commit, so a test
+        /// can move the file inside that window. There is no other way to reach it: the parse is one
+        /// synchronous call and a real race is not reproducible.
+        var claudeDidParseFileForTesting: (@Sendable (URL) -> Void)?
 
         init(
             codexSessionsRoot: URL? = nil,

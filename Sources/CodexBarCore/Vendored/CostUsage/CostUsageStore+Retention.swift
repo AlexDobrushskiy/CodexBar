@@ -107,11 +107,128 @@ extension CostUsageStore {
             let afterSnapshots = try self.scalarInt(database, "SELECT COUNT(*) FROM token_snapshots")
             let afterFileAggregates = try self.scalarInt(database, "SELECT COUNT(*) FROM file_day_aggregates")
             let afterAggregates = try self.scalarInt(database, "SELECT COUNT(*) FROM day_aggregates")
-            return CostUsageStoreRetentionResult(
+            return try CostUsageStoreRetentionResult(
                 deletedFiles: Int(beforeFiles - afterFiles),
                 deletedTokenSnapshots: Int(beforeSnapshots - afterSnapshots),
                 deletedFileDayAggregates: Int(beforeFileAggregates - afterFileAggregates),
-                deletedDayAggregates: Int(beforeAggregates - afterAggregates))
+                deletedDayAggregates: Int(beforeAggregates - afterAggregates),
+                claude: self.pruneClaude(
+                    database,
+                    sinceDay: sinceDay,
+                    untilDay: untilDay,
+                    roots: nil))
+        }
+    }
+
+    /// Prunes the Claude tables to a day window.
+    ///
+    /// Separate from the Codex prune above rather than reached by cascade: Claude owns its own file
+    /// namespace precisely so Codex coverage and fork rules cannot delete its rows.
+    /// `roots` bounds the prune to one ledger's transcripts; `nil` prunes every tracked file.
+    @discardableResult
+    func retainClaudeDayWindow(
+        sinceDay: String,
+        untilDay: String,
+        roots: [String]? = nil) -> CostUsageStoreClaudeRetentionResult
+    {
+        guard sinceDay <= untilDay else { return CostUsageStoreClaudeRetentionResult() }
+        return self.withDatabase(default: CostUsageStoreClaudeRetentionResult()) { database in
+            try Self.inTransaction(database) {
+                try Self.pruneClaude(database, sinceDay: sinceDay, untilDay: untilDay, roots: roots)
+            }
+        }
+    }
+
+    /// Transcripts the store can no longer answer for over `sinceDay`.
+    ///
+    /// Pruning events while keeping EOF offsets is what would make a later, wider window look
+    /// falsely complete, so coverage is clamped to what survived and this reports the files whose
+    /// coverage no longer reaches back far enough. They need a full reparse, not an incremental one.
+    func claudeSourceFilesNeedingReparse(sinceDay: String) -> [String] {
+        self.withDatabase(default: []) { database in
+            let statement = try Self.prepare(database, """
+            SELECT path FROM claude_source_files
+            WHERE coverage_since_day IS NULL OR coverage_since_day > ?
+            ORDER BY path_sort_key
+            """)
+            defer { sqlite3_finalize(statement) }
+            Self.bind(sinceDay, to: statement, at: 1)
+            var paths: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let path = Self.columnText(statement, at: 0) else { continue }
+                paths.append(path)
+            }
+            return paths
+        }
+    }
+
+    private static func pruneClaude(
+        _ database: OpaquePointer,
+        sinceDay: String,
+        untilDay: String,
+        roots: [String]?) throws -> CostUsageStoreClaudeRetentionResult
+    {
+        let beforeEvents = try self.scalarInt(database, "SELECT COUNT(*) FROM claude_usage_events")
+        let beforeFiles = try self.scalarInt(database, "SELECT COUNT(*) FROM claude_source_files")
+        let bounds = roots?.map { self.claudeRootPrefixBounds($0) }
+        let scope = bounds.map { list in
+            " AND id IN (SELECT id FROM claude_source_files WHERE "
+                + list.map { _ in "(path >= ? AND path < ?)" }.joined(separator: " OR ") + ")"
+        } ?? ""
+
+        let deleteEvents = try self.prepare(database, """
+        DELETE FROM claude_usage_events
+        WHERE (day < ?1 OR day > ?2)
+          AND file_id IN (SELECT id FROM claude_source_files WHERE 1\(scope.isEmpty ? "" : scope))
+        """)
+        defer { sqlite3_finalize(deleteEvents) }
+        self.bind(sinceDay, to: deleteEvents, at: 1)
+        self.bind(untilDay, to: deleteEvents, at: 2)
+        self.bindClaudeRootBounds(bounds, to: deleteEvents, from: 3)
+        try self.stepDone(deleteEvents, database: database)
+
+        // Coverage now describes only what survived, so a later wider window can tell that this
+        // file's older days are gone even though its parsed offset still sits at EOF.
+        let clamp = try self.prepare(database, """
+        UPDATE claude_source_files
+        SET coverage_since_day = MAX(COALESCE(coverage_since_day, ?1), ?1),
+            coverage_until_day = MIN(COALESCE(coverage_until_day, ?2), ?2)
+        WHERE 1\(scope)
+        """)
+        defer { sqlite3_finalize(clamp) }
+        self.bind(sinceDay, to: clamp, at: 1)
+        self.bind(untilDay, to: clamp, at: 2)
+        self.bindClaudeRootBounds(bounds, to: clamp, from: 3)
+        try self.stepDone(clamp, database: database)
+
+        // A transcript with nothing left in the window describes nothing; keeping its offsets is
+        // the falsely-complete state itself.
+        let deleteFiles = try self.prepare(database, """
+        DELETE FROM claude_source_files
+        WHERE id NOT IN (SELECT file_id FROM claude_usage_events)\(scope)
+        """)
+        defer { sqlite3_finalize(deleteFiles) }
+        self.bindClaudeRootBounds(bounds, to: deleteFiles, from: 1)
+        try self.stepDone(deleteFiles, database: database)
+
+        let afterEvents = try self.scalarInt(database, "SELECT COUNT(*) FROM claude_usage_events")
+        let afterFiles = try self.scalarInt(database, "SELECT COUNT(*) FROM claude_source_files")
+        return CostUsageStoreClaudeRetentionResult(
+            deletedEvents: Int(beforeEvents - afterEvents),
+            deletedSourceFiles: Int(beforeFiles - afterFiles))
+    }
+
+    private static func bindClaudeRootBounds(
+        _ bounds: [(lower: String, upper: String)]?,
+        to statement: OpaquePointer,
+        from index: Int32)
+    {
+        guard let bounds else { return }
+        var next = index
+        for pair in bounds {
+            self.bind(pair.lower, to: statement, at: next)
+            self.bind(pair.upper, to: statement, at: next + 1)
+            next += 2
         }
     }
 

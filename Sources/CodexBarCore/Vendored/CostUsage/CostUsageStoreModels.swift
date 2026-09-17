@@ -233,6 +233,14 @@ struct CostUsageStoreRetentionResult: Equatable, Sendable {
     var deletedTokenSnapshots: Int
     var deletedFileDayAggregates: Int
     var deletedDayAggregates: Int
+    /// Claude keeps its own file namespace, so it is pruned alongside rather than by cascade.
+    var claude = CostUsageStoreClaudeRetentionResult()
+}
+
+/// What a day-window prune removed from the Claude tables.
+struct CostUsageStoreClaudeRetentionResult: Equatable, Sendable {
+    var deletedEvents = 0
+    var deletedSourceFiles = 0
 }
 
 struct CostUsageStoreBudgetResult: Equatable, Sendable {
@@ -385,4 +393,30 @@ struct ClaudeStoreModelPrice: Equatable, Sendable {
 struct ClaudeStoreModelKey: Hashable, Sendable {
     var model: String
     var backend: String
+}
+
+/// How a file write treats the events already stored for that file.
+enum ClaudeStoreEventWriteMode: Sendable {
+    /// A full reparse or an identity replacement: the file's events are deleted first, in the same
+    /// transaction, so rows no longer in the transcript cannot survive.
+    case replace
+    /// An incremental append: keyed winners upsert and new unkeyed ordinals insert.
+    case append
+}
+
+/// The result of a compare-and-set write of one transcript's state.
+enum ClaudeStoreFileWrite: Equatable, Sendable {
+    case written(Int64)
+    /// The stored baseline moved; carries what is actually recorded so the caller can reload.
+    case rejected(ClaudeStoreSourceFile?)
+
+    var isWritten: Bool {
+        if case .written = self { return true }
+        return false
+    }
+
+    var fileID: Int64? {
+        if case let .written(id) = self { return id }
+        return nil
+    }
 }
