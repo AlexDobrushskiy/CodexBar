@@ -73,7 +73,7 @@ struct CostUsageTimestampTests {
     }
 
     @Test
-    func `Claude ingestion preserves tokens days deduplication and dated pricing`() throws {
+    func `Claude ingestion preserves tokens days deduplication and dated pricing`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         var calendar = Calendar(identifier: .gregorian)
@@ -109,7 +109,7 @@ struct CostUsageTimestampTests {
             providerFilter: .all,
             pricingResolver: CostUsagePricing.ClaudeResolver(now: Date(), cacheRoot: env.cacheRoot))
         #expect(parsed.rows.count == timestamps.count)
-        var expectedDays: [String: [String: [Int]]] = [:]
+        var expectedDays: [String: [String: Int]] = [:]
         for (index, text) in timestamps.enumerated() {
             let date = try #require(Self.historicalDate(text))
             let day = try #require(CostUsageScanner.dayKeyFromTimestamp(text, calendar: calendar))
@@ -126,12 +126,7 @@ struct CostUsageTimestampTests {
             #expect(row.timestampUnixMs == Int64((date.timeIntervalSince1970 * 1000).rounded()))
             #expect(row.dayKey == day)
             #expect(row.costNanos == nanos)
-            let packed = [210_000, 25, 50, 20, nanos, 1, 1, 0]
-            var total = expectedDays[day]?[model] ?? Array(repeating: 0, count: packed.count)
-            for slot in packed.indices {
-                total[slot] += packed[slot]
-            }
-            expectedDays[day] = [model: total]
+            expectedDays[day, default: [:]][model, default: 0] += 210_000 + 25 + 50 + 20
         }
         let options = CostUsageScanner.Options(
             claudeProjectsRoots: [env.claudeProjectsRoot], cacheRoot: env.cacheRoot, calendar: calendar)
@@ -139,9 +134,8 @@ struct CostUsageTimestampTests {
         let until = try #require(Self.historicalDate("2026-03-31T00:00:00Z"))
         let report = CostUsageScanner.loadDailyReport(
             provider: .claude, since: since, until: until, now: until, options: options)
-        let cache = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot).usage
-        #expect(cache.days == expectedDays)
-        #expect(cache.files.values.flatMap { $0.claudeRows ?? [] } == parsed.rows)
+        #expect(await env.storedClaudeDayTotals() == expectedDays)
+        #expect(await env.storedClaudeEvents().facts == parsed.rows.facts)
         #expect(report.data.count == expectedDays.count)
         #expect(report.summary?.totalTokens == timestamps.count * (210_000 + 25 + 50 + 20))
         #expect(parsed.parsedBytes == Int64(Data(contents.utf8).count))

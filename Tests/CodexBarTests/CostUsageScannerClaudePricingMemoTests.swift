@@ -59,9 +59,11 @@ struct CostUsageScannerClaudePricingMemoTests {
         #expect(appendWork.catalogModelMisses == 1)
         #expect(appendReads == 1)
 
-        let cacheURL = CostUsageClaudeCacheIO.cacheFileURL(provider: .claude, cacheRoot: env.cacheRoot)
-        let cacheData = try Data(contentsOf: cacheURL)
-        let cacheStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
+        // Repricing must not re-run the scan: the store's ledger generation records every commit,
+        // and the transcripts themselves must not be touched.
+        let generation = CostUsageScanner.claudeLedgerGenerationForTesting(
+            roots: [env.claudeProjectsRoot],
+            cacheRoot: env.cacheRoot)
         let sourceStamps = files.map { CostUsageClaudeFileStamp.read(at: $0) }
         let sourceData = try files.map { try Data(contentsOf: $0) }
         try self.save([known: 20, unknown: 30], day: day, env: env)
@@ -76,8 +78,9 @@ struct CostUsageScannerClaudePricingMemoTests {
         #expect(repriceWork.catalogModelMisses == 0)
         #expect(repriceWork.normalizationCacheMisses == 2)
         #expect(repriceReads == 1)
-        #expect(try Data(contentsOf: cacheURL) == cacheData)
-        #expect(CostUsageClaudeFileStamp.read(at: cacheURL) == cacheStamp)
+        #expect(CostUsageScanner.claudeLedgerGenerationForTesting(
+            roots: [env.claudeProjectsRoot],
+            cacheRoot: env.cacheRoot) == generation)
         #expect(files.map { CostUsageClaudeFileStamp.read(at: $0) } == sourceStamps)
         #expect(try files.map { try Data(contentsOf: $0) } == sourceData)
         let (repricedWarm, lastWork, lastReads) = try self.load(env: env, day: day)

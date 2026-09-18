@@ -90,6 +90,7 @@ extension CostUsageStore {
                 guard let fileID = try Self.claudeSourceFileID(database, path: file.path) else {
                     throw StoreError.invalidData
                 }
+                var ordinal = Int64(0)
                 if mode == .replace {
                     let delete = try Self.prepare(
                         database,
@@ -97,13 +98,30 @@ extension CostUsageStore {
                     defer { sqlite3_finalize(delete) }
                     Self.bind(fileID, to: delete, at: 1)
                     try Self.stepDone(delete, database: database)
+                } else {
+                    // Append continues the file's ordinals. A keyed row that is already stored
+                    // upserts onto its new ordinal, which is the last-chunk-wins rule; an unkeyed
+                    // one takes a fresh ordinal rather than colliding with an existing line.
+                    ordinal = try Self.nextClaudeRowIndex(database, fileID: fileID)
                 }
                 for event in events {
-                    try Self.upsertClaudeUsageEvent(database, fileID: fileID, event: event)
+                    var placed = event
+                    placed.rowIndex += Int(ordinal)
+                    try Self.upsertClaudeUsageEvent(database, fileID: fileID, event: placed)
                 }
                 return .written(fileID)
             }
         }
+    }
+
+    private static func nextClaudeRowIndex(_ database: OpaquePointer, fileID: Int64) throws -> Int64 {
+        let statement = try Self.prepare(
+            database,
+            "SELECT COALESCE(MAX(row_index) + 1, 0) FROM claude_usage_events WHERE file_id = ?")
+        defer { sqlite3_finalize(statement) }
+        Self.bind(fileID, to: statement, at: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return sqlite3_column_int64(statement, 0)
     }
 
     /// The baseline is the mutable file state a parse was based on, never its derived columns.
@@ -519,10 +537,11 @@ extension CostUsageStore {
     nonisolated func syncWriteClaudeFile(
         file: ClaudeStoreSourceFile,
         events: [ClaudeStoreUsageEvent],
+        mode: ClaudeStoreEventWriteMode,
         expecting baseline: ClaudeStoreSourceFile?) -> ClaudeStoreFileWrite
     {
         self.syncWithStoreIsolation { store in
-            store.writeClaudeFile(file, events: events, mode: .replace, expecting: baseline)
+            store.writeClaudeFile(file, events: events, mode: mode, expecting: baseline)
         }
     }
 
@@ -561,5 +580,78 @@ extension CostUsageStore {
 
     nonisolated func syncDeleteClaudeSourceFile(path: String) -> Bool {
         self.syncWithStoreIsolation { $0.deleteClaudeSourceFile(path: path) }
+    }
+}
+
+// MARK: - Ledger scan state (schema v7)
+
+extension CostUsageStore {
+    func readClaudeLedgerState(rootsFingerprint: String) -> ClaudeStoreLedgerState? {
+        self.withDatabase(default: nil) { database in
+            let statement = try Self.prepare(database, """
+            SELECT roots_fingerprint, scan_since_day, scan_until_day, last_scan_ms, generation
+            FROM claude_ledger_state WHERE roots_fingerprint = ?
+            """)
+            defer { sqlite3_finalize(statement) }
+            Self.bind(rootsFingerprint, to: statement, at: 1)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return ClaudeStoreLedgerState(
+                rootsFingerprint: Self.columnText(statement, at: 0) ?? "",
+                scanSinceDay: Self.columnText(statement, at: 1) ?? "",
+                scanUntilDay: Self.columnText(statement, at: 2) ?? "",
+                lastScanMs: sqlite3_column_int64(statement, 3),
+                generation: sqlite3_column_int64(statement, 4))
+        }
+    }
+
+    /// Records the window this ledger has now covered and advances its generation.
+    ///
+    /// The window only ever widens within a retained store: narrowing it would let a later, wider
+    /// request believe the missing days were simply never used.
+    @discardableResult
+    func advanceClaudeLedgerState(
+        rootsFingerprint: String,
+        scanSinceDay: String,
+        scanUntilDay: String,
+        lastScanMs: Int64) -> ClaudeStoreLedgerState?
+    {
+        self.withDatabase(default: nil) { database in
+            let statement = try Self.prepare(database, """
+            INSERT INTO claude_ledger_state(
+                roots_fingerprint, scan_since_day, scan_until_day, last_scan_ms, generation)
+            VALUES(?,?,?,?,1)
+            ON CONFLICT(roots_fingerprint) DO UPDATE SET
+                scan_since_day = MIN(scan_since_day, excluded.scan_since_day),
+                scan_until_day = MAX(scan_until_day, excluded.scan_until_day),
+                last_scan_ms = excluded.last_scan_ms,
+                generation = generation + 1
+            """)
+            defer { sqlite3_finalize(statement) }
+            Self.bind(rootsFingerprint, to: statement, at: 1)
+            Self.bind(scanSinceDay, to: statement, at: 2)
+            Self.bind(scanUntilDay, to: statement, at: 3)
+            Self.bind(lastScanMs, to: statement, at: 4)
+            try Self.stepDone(statement, database: database)
+            return self.readClaudeLedgerState(rootsFingerprint: rootsFingerprint)
+        }
+    }
+
+    nonisolated func syncReadClaudeLedgerState(rootsFingerprint: String) -> ClaudeStoreLedgerState? {
+        self.syncWithStoreIsolation { $0.readClaudeLedgerState(rootsFingerprint: rootsFingerprint) }
+    }
+
+    nonisolated func syncAdvanceClaudeLedgerState(
+        rootsFingerprint: String,
+        scanSinceDay: String,
+        scanUntilDay: String,
+        lastScanMs: Int64) -> ClaudeStoreLedgerState?
+    {
+        self.syncWithStoreIsolation {
+            $0.advanceClaudeLedgerState(
+                rootsFingerprint: rootsFingerprint,
+                scanSinceDay: scanSinceDay,
+                scanUntilDay: scanUntilDay,
+                lastScanMs: lastScanMs)
+        }
     }
 }

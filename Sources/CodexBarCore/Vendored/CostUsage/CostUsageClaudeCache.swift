@@ -38,7 +38,10 @@ struct CostUsageClaudeReportMemoKey: Equatable, Sendable, Codable {
     let scanUntilKey: String
     let timeZoneIdentifier: String
     let roots: [String]
-    let cacheArtifactStamp: CostUsageClaudeFileStamp?
+    /// The store's ledger generation when this report was built. Replaces the mtime of the JSON
+    /// artifact that used to sit beside it: the store is the scan state now, so "has the data moved
+    /// under this memo" is a question about the store.
+    let storeGeneration: Int64
     let pricingArtifactStamp: CostUsageClaudeFileStamp?
 
     var scanConfiguration: ScanConfiguration {
@@ -269,17 +272,14 @@ extension CostUsageScanner {
     }
 
     static func evictClaudeReportMemoForTesting(provider: UsageProvider, cacheRoot: URL?) {
-        let cacheURL = CostUsageClaudeCacheIO.cacheFileURL(provider: provider, cacheRoot: cacheRoot)
-        let canonicalCachePath = cacheURL.standardizedFileURL.resolvingSymlinksInPath().path
         CostUsageClaudeReportMemo.shared.evict(
             provider: provider,
-            canonicalCachePath: canonicalCachePath)
+            canonicalCachePath: claudeMemoIdentityPath(provider: provider, cacheRoot: cacheRoot))
     }
 
     static func evictPersistedClaudeReportMemoForTesting(provider: UsageProvider, cacheRoot: URL?) {
-        let cacheURL = CostUsageClaudeCacheIO.cacheFileURL(provider: provider, cacheRoot: cacheRoot)
-        let canonicalCachePath = cacheURL.standardizedFileURL.resolvingSymlinksInPath().path
-        CostUsageClaudeReportMemo.shared.evictPersisted(canonicalCachePath: canonicalCachePath)
+        CostUsageClaudeReportMemo.shared.evictPersisted(
+            canonicalCachePath: claudeMemoIdentityPath(provider: provider, cacheRoot: cacheRoot))
     }
 }
 #endif
@@ -302,79 +302,5 @@ struct CostUsageClaudeCache: Codable {
         try self.usage.encode(to: encoder)
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(self.sourceFileIDs, forKey: .sourceFileIDs)
-    }
-}
-
-/// Claude, Vertex and Bedrock retain their small transcript cache. Codex deliberately has no route
-/// through this JSON I/O boundary; its only persistence authority is `CostUsageStore`.
-enum CostUsageClaudeCacheIO {
-    private static func defaultCacheRoot() -> URL {
-        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        return root.appendingPathComponent("CodexBar", isDirectory: true)
-    }
-
-    // Provider-specific by design: Claude/Vertex cost caching still uses the legacy JSON artifact pending its own
-    // migration (see #2760).
-
-    static func cacheFileURL(provider: UsageProvider, cacheRoot: URL? = nil) -> URL {
-        precondition(provider == .claude || provider == .vertexai || provider == .bedrock)
-        let root = cacheRoot ?? self.defaultCacheRoot()
-        return root
-            .appendingPathComponent("cost-usage", isDirectory: true)
-            .appendingPathComponent("\(provider.rawValue)-v6.json", isDirectory: false)
-    }
-
-    static func load(
-        provider: UsageProvider,
-        cacheRoot: URL? = nil,
-        calendar: Calendar? = nil) -> CostUsageClaudeCache
-    {
-        let url = self.cacheFileURL(provider: provider, cacheRoot: cacheRoot)
-        guard let data = try? Data(contentsOf: url) else { return CostUsageClaudeCache() }
-        #if DEBUG
-        CostUsageScanner.recordClaudeScanWork(.cacheDecode)
-        #endif
-        guard let cache = try? JSONDecoder().decode(CostUsageClaudeCache.self, from: data),
-              cache.usage.version == 1
-        else { return CostUsageClaudeCache() }
-        if let calendar, cache.usage.timeZoneIdentifier != calendar.timeZone.identifier {
-            return CostUsageClaudeCache()
-        }
-        return cache
-    }
-
-    static func save(
-        provider: UsageProvider,
-        cache: CostUsageClaudeCache,
-        cacheRoot: URL? = nil,
-        calendar: Calendar = .current,
-        checkCancellation: CostUsageScanner.CancellationCheck? = nil) throws -> CostUsageClaudeFileStamp?
-    {
-        let url = self.cacheFileURL(provider: provider, cacheRoot: cacheRoot)
-        var cache = cache
-        cache.usage.timeZoneIdentifier = calendar.timeZone.identifier
-        #if DEBUG
-        CostUsageScanner.recordClaudeScanWork(.cacheEncode)
-        #endif
-        guard let data = try? JSONEncoder().encode(cache) else { return nil }
-        try checkCancellation?()
-        let directory = url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true)
-        let temporaryURL = directory.appendingPathComponent(".claude-cache-\(UUID().uuidString).tmp")
-        do {
-            try data.write(to: temporaryURL)
-            guard let stamp = CostUsageClaudeFileStamp.read(at: temporaryURL),
-                  rename(temporaryURL.path, url.path) == 0
-            else {
-                try? FileManager.default.removeItem(at: temporaryURL)
-                return nil
-            }
-            return stamp
-        } catch {
-            try? FileManager.default.removeItem(at: temporaryURL)
-            return nil
-        }
     }
 }

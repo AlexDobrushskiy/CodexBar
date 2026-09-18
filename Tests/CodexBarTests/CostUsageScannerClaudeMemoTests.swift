@@ -64,52 +64,27 @@ struct CostUsageScannerClaudeMemoTests {
     }
 
     @Test
-    func `cache identities round trip with empty parsed rows and prune removed files`() throws {
+    func `file identities round trip and an empty removed transcript is dropped`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 7, day: 1)
         let file = try env.writeClaudeProjectFile(relativePath: "project/empty.jsonl", contents: "{}\n")
         let options = self.options(env: env)
         _ = self.load(day: day, options: options)
-        let artifact = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot)
-        let path = try #require(artifact.usage.files.keys.first)
-        #expect(artifact.usage.files[path]?.claudeRows == [])
-        #expect(artifact.sourceFileIDs[path] == CostUsageClaudeFileStamp.read(at: file)?.fileID)
+
+        let tracked = try #require(await env.storedClaudeFiles().first)
+        #expect(await env.storedClaudeEvents().isEmpty, "the transcript reported no usage")
+        #expect(tracked.fileIdentity == CostUsageClaudeFileStamp.read(at: file)?.fileID)
         CostUsageScanner.evictClaudeReportMemoForTesting(provider: .claude, cacheRoot: env.cacheRoot)
+        // A transcript that reported nothing is still tracked, so it is not parsed again.
         #expect(self.recordedLoad(day: day, options: options).1.transcriptParses == 0)
+
         try FileManager.default.removeItem(at: file)
         _ = self.load(day: day, options: options)
-        let pruned = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot)
-        #expect(pruned.usage.files.isEmpty)
-        #expect(pruned.sourceFileIDs.isEmpty)
-    }
 
-    @Test
-    func `legacy cache without file identity is rebuilt once before append reuse`() throws {
-        let env = try CostUsageTestEnvironment()
-        defer { env.cleanup() }
-        let day = try env.makeLocalNoon(year: 2026, month: 7, day: 1)
-        let file = try self.writeEvent(env: env, day: day, path: "project/session.jsonl", id: "same", input: 10)
-        var options = self.options(env: env)
-        options.refreshMinIntervalSeconds = 60
-        _ = self.load(day: day, options: options)
-        var cache = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot)
-        #expect(cache.usage.files.count == 1)
-        let path = try #require(cache.usage.files.keys.first)
-        #expect(cache.sourceFileIDs[path] == CostUsageClaudeFileStamp.read(at: file)?.fileID)
-        cache.sourceFileIDs[path] = nil
-        let legacyData = try JSONEncoder().encode(cache.usage)
-        try legacyData.write(to: CostUsageClaudeCacheIO.cacheFileURL(provider: .claude, cacheRoot: env.cacheRoot))
-        CostUsageScanner.evictClaudeReportMemoForTesting(provider: .claude, cacheRoot: env.cacheRoot)
-
-        let (report, work) = self.recordedLoad(day: day, options: options)
-        #expect(report.summary?.totalInputTokens == 10)
-        #expect(work.transcriptParses == 1)
-        #expect(work.incrementalTranscriptParses == 0)
-        let refreshed = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot)
-        #expect(refreshed.sourceFileIDs[path] == CostUsageClaudeFileStamp.read(at: file)?.fileID)
-        CostUsageScanner.evictClaudeReportMemoForTesting(provider: .claude, cacheRoot: env.cacheRoot)
-        #expect(self.recordedLoad(day: day, options: options).1.transcriptParses == 0)
+        // Gone and it never reported anything, so there is nothing left to archive. A transcript
+        // that did report usage keeps its rows; see ClaudeUsageStoreArchiveTests.
+        #expect(await env.storedClaudeFiles().isEmpty)
     }
 
     @Test
@@ -120,15 +95,14 @@ struct CostUsageScannerClaudeMemoTests {
         _ = try self.writeEvent(env: env, day: day, path: "project/session.jsonl", id: "first", input: 10)
         let options = self.options(env: env)
         let initial = self.load(day: day, options: options)
-        let cacheURL = self.cacheURL(env: env)
-        let cacheStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
+        let generation = self.ledgerGeneration(env: env)
 
         let (warm, metrics) = self.recordedLoad(day: day, options: options)
 
         #expect(warm.data == initial.data)
         #expect(warm.summary == initial.summary)
         #expect(metrics == CostUsageScanner.ClaudeScanWorkMetrics())
-        #expect(CostUsageClaudeFileStamp.read(at: cacheURL) == cacheStamp)
+        #expect(self.ledgerGeneration(env: env) == generation, "no scan committed")
     }
 
     @Test
@@ -140,7 +114,7 @@ struct CostUsageScannerClaudeMemoTests {
         _ = try self.writeEvent(env: env, day: day, path: "project/second.jsonl", id: "second", input: 20)
         let options = self.options(env: env)
         let initial = self.load(day: day, options: options)
-        let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: self.cacheURL(env: env))
+        let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: self.memoIdentityURL(env: env))
         #expect(FileManager.default.fileExists(atPath: memoURL.path))
         CostUsageScanner.evictClaudeReportMemoForTesting(provider: .claude, cacheRoot: env.cacheRoot)
 
@@ -160,7 +134,7 @@ struct CostUsageScannerClaudeMemoTests {
         let options = self.options(env: env)
         let initial = self.load(day: day, options: options)
         let sourceStamp = CostUsageClaudeFileStamp.read(at: sourceURL)
-        let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: self.cacheURL(env: env))
+        let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: self.memoIdentityURL(env: env))
         var envelope = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: memoURL)) as? [String: Any])
         envelope["reportSemanticsVersion"] = revision
         envelope["report"] = [
@@ -193,7 +167,7 @@ struct CostUsageScannerClaudeMemoTests {
         CostUsageScanner.evictClaudeReportMemoForTesting(provider: .claude, cacheRoot: env.cacheRoot)
         CostUsageScanner.evictPersistedClaudeReportMemoForTesting(provider: .claude, cacheRoot: env.cacheRoot)
         if corrupt {
-            let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: self.cacheURL(env: env))
+            let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: self.memoIdentityURL(env: env))
             try Data("invalid JSON".utf8).write(to: memoURL)
         }
 
@@ -308,26 +282,30 @@ struct CostUsageScannerClaudeMemoTests {
     }
 
     @Test
-    func `external atomic cache replacement invalidates the memo`() throws {
+    func `an external store write invalidates the memo`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 7, day: 5)
         _ = try self.writeEvent(env: env, day: day, path: "project/session.jsonl", id: "first", input: 10)
         let options = self.options(env: env)
         let initial = self.load(day: day, options: options)
-        let cacheURL = self.cacheURL(env: env)
-        let originalStamp = try #require(CostUsageClaudeFileStamp.read(at: cacheURL))
-        let cacheData = try Data(contentsOf: cacheURL)
-        try cacheData.write(to: cacheURL, options: [.atomic])
-        let replacementStamp = try #require(CostUsageClaudeFileStamp.read(at: cacheURL))
-        #expect(replacementStamp.fileID != originalStamp.fileID)
+        let generation = self.ledgerGeneration(env: env)
+
+        // Another process scanning the same ledger advances its generation, which is what the memo
+        // keys on now that there is no cache file whose mtime could move.
+        _ = await env.claudeStore.advanceClaudeLedgerState(
+            rootsFingerprint: [env.claudeProjectsRoot.standardizedFileURL.resolvingSymlinksInPath().path]
+                .joined(separator: "\n"),
+            scanSinceDay: "2026-06-30",
+            scanUntilDay: "2026-07-02",
+            lastScanMs: 1)
+        #expect(self.ledgerGeneration(env: env) != generation)
 
         let (report, metrics) = self.recordedLoad(day: day, options: options)
 
         #expect(report.data == initial.data)
-        #expect(metrics.cacheDecodes == 1)
+        #expect(metrics.cacheDecodes == 1, "the memo was rejected, so the store was read again")
         #expect(metrics.transcriptParses == 0)
-        #expect(metrics.cacheEncodes == 1)
     }
 
     @Test
@@ -368,8 +346,7 @@ struct CostUsageScannerClaudeMemoTests {
             cacheRoot: env.cacheRoot))
         let options = self.options(env: env)
         let first = self.load(day: day, options: options)
-        let cacheURL = self.cacheURL(env: env)
-        let cacheStamp = CostUsageClaudeFileStamp.read(at: cacheURL)
+        let generation = self.ledgerGeneration(env: env)
         #expect(abs((first.summary?.totalCostUSD ?? 0) - 0.001) < 0.000000001)
         #expect(try ModelsDevCache.save(
             catalog: self.catalog(model: model, inputRate: 20),
@@ -386,7 +363,7 @@ struct CostUsageScannerClaudeMemoTests {
         #expect(metrics.transcriptParses == 0)
         #expect(metrics.cacheEncodes == 0)
         #expect(metrics.repricedRows == 1)
-        #expect(CostUsageClaudeFileStamp.read(at: cacheURL) == cacheStamp)
+        #expect(self.ledgerGeneration(env: env) == generation, "no scan committed")
     }
 
     @Test
@@ -412,18 +389,18 @@ struct CostUsageScannerClaudeMemoTests {
     }
 
     @Test
-    func `cancellation preserves disk and the prior memo`() throws {
+    func `cancellation preserves the store and the prior memo`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 7, day: 9)
         _ = try self.writeEvent(env: env, day: day, path: "project/session.jsonl", id: "first", input: 10)
         var options = self.options(env: env)
         _ = self.load(day: day, options: options)
-        let cacheURL = self.cacheURL(env: env)
-        let diskBefore = try Data(contentsOf: cacheURL)
-        let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(cacheFileURL: cacheURL)
+        let memoURL = CostUsageClaudeReportMemo.reportMemoFileURL(
+            cacheFileURL: self.memoIdentityURL(env: env))
         let memoBefore = try Data(contentsOf: memoURL)
-        let stampBefore = CostUsageClaudeFileStamp.read(at: cacheURL)
+        let generationBefore = self.ledgerGeneration(env: env)
+        let eventsBefore = await env.storedClaudeEvents()
         options.forceRescan = true
         var checks = 0
 
@@ -441,9 +418,9 @@ struct CostUsageScannerClaudeMemoTests {
                     }
                 })
         }
-        #expect(try Data(contentsOf: cacheURL) == diskBefore)
         #expect(try Data(contentsOf: memoURL) == memoBefore)
-        #expect(CostUsageClaudeFileStamp.read(at: cacheURL) == stampBefore)
+        #expect(self.ledgerGeneration(env: env) == generationBefore, "no scan committed")
+        #expect(await env.storedClaudeEvents() == eventsBefore)
 
         options.forceRescan = false
         let (_, metrics) = self.recordedLoad(day: day, options: options)
@@ -556,7 +533,17 @@ struct CostUsageScannerClaudeMemoTests {
         """.utf8))
     }
 
-    private func cacheURL(env: CostUsageTestEnvironment) -> URL {
-        CostUsageClaudeCacheIO.cacheFileURL(provider: .claude, cacheRoot: env.cacheRoot)
+    /// Identity the report memo hangs off. Names no file that exists — the store is the scan
+    /// state now, and the memo derives only its own filename from this.
+    private func memoIdentityURL(env: CostUsageTestEnvironment) -> URL {
+        URL(fileURLWithPath: CostUsageScanner.claudeMemoIdentityPath(
+            provider: .claude,
+            cacheRoot: env.cacheRoot))
+    }
+
+    private func ledgerGeneration(env: CostUsageTestEnvironment) -> Int64 {
+        CostUsageScanner.claudeLedgerGenerationForTesting(
+            roots: [env.claudeProjectsRoot],
+            cacheRoot: env.cacheRoot)
     }
 }

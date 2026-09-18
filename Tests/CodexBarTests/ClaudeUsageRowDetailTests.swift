@@ -2,9 +2,9 @@ import Foundation
 import Testing
 @testable import CodexBarCore
 
-/// The scanner already builds a row per transcript line and then collapses it into day×model
-/// totals, dropping everything that makes usage answerable by project, branch or backend. These
-/// fields are present in every transcript line; this asserts the parsed row keeps them.
+/// The scanner used to collapse each transcript line into day×model totals, dropping everything
+/// that makes usage answerable by project, branch or backend. These fields are present in every
+/// transcript line; this asserts they survive all the way into the store.
 @Suite(.serialized)
 struct ClaudeUsageRowDetailTests {
     private static func transcriptLine(
@@ -42,10 +42,10 @@ struct ClaudeUsageRowDetailTests {
         return try #require(String(bytes: data, encoding: .utf8))
     }
 
-    private static func parsedRow(
+    private static func storedRow(
         _ env: CostUsageTestEnvironment,
         line: String,
-        day: Date) throws -> CostUsageScanner.ClaudeUsageRow
+        day: Date) async throws -> ClaudeStoreUsageEvent
     {
         _ = try env.writeClaudeProjectFile(relativePath: "-p/session.jsonl", contents: line + "\n")
         var options = CostUsageScanner.Options(cacheRoot: env.cacheRoot)
@@ -57,17 +57,16 @@ struct ClaudeUsageRowDetailTests {
             until: day,
             now: day,
             options: options)
-        let cache = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot)
-        let rows = cache.usage.files.values.flatMap { $0.claudeRows ?? [] }
-        return try #require(rows.first)
+        let store = CostUsageStore(cacheRoot: env.cacheRoot)
+        return try #require(await store.readReconciledClaudeEvents().first?.event)
     }
 
     @Test
-    func `a parsed row carries project branch effort tier and tool counts`() throws {
+    func `a parsed row carries project branch effort tier and tool counts`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 9, day: 17)
-        let row = try Self.parsedRow(
+        let row = try await Self.storedRow(
             env,
             line: Self.transcriptLine(
                 timestamp: env.isoString(for: day),
@@ -87,40 +86,40 @@ struct ClaudeUsageRowDetailTests {
     /// The row records which backend billed it, so the ledger split is a column rather than two
     /// separately filtered scans writing two cache files.
     @Test
-    func `a parsed row records the billing backend`() throws {
+    func `a parsed row records the billing backend`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 9, day: 17)
 
-        let firstParty = try Self.parsedRow(
+        let firstParty = try await Self.storedRow(
             env,
             line: Self.transcriptLine(
                 timestamp: env.isoString(for: day),
                 messageID: "msg_011detail",
                 model: "claude-opus-5"),
             day: day)
-        #expect(firstParty.backend == .firstParty)
+        #expect(firstParty.backend == "firstParty")
 
         let bedrockEnv = try CostUsageTestEnvironment()
         defer { bedrockEnv.cleanup() }
-        let bedrock = try Self.parsedRow(
+        let bedrock = try await Self.storedRow(
             bedrockEnv,
             line: Self.transcriptLine(
                 timestamp: bedrockEnv.isoString(for: day),
                 messageID: "msg_bdrk_detail",
                 model: "claude-opus-5"),
             day: day)
-        #expect(bedrock.backend == .bedrock)
+        #expect(bedrock.backend == "bedrock")
     }
 
     /// Normalization can change as aliases move, so the as-written model is kept alongside it and
     /// a pricing correction never needs a transcript reparse.
     @Test
-    func `a parsed row keeps the model as written`() throws {
+    func `a parsed row keeps the model as written`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 9, day: 17)
-        let row = try Self.parsedRow(
+        let row = try await Self.storedRow(
             env,
             line: Self.transcriptLine(
                 timestamp: env.isoString(for: day),
@@ -129,6 +128,6 @@ struct ClaudeUsageRowDetailTests {
             day: day)
 
         #expect(row.rawModel == "anthropic.claude-haiku-4-5-20251001-v1:0")
-        #expect(row.backend == .bedrock, "the Bedrock model namespace also marks the backend")
+        #expect(row.backend == "bedrock", "the Bedrock model namespace also marks the backend")
     }
 }

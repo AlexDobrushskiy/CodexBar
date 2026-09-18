@@ -201,11 +201,14 @@ extension CostUsageStore {
         self.bindClaudeRootBounds(bounds, to: clamp, from: 3)
         try self.stepDone(clamp, database: database)
 
-        // A transcript with nothing left in the window describes nothing; keeping its offsets is
-        // the falsely-complete state itself.
+        // An archived transcript with nothing left in the window describes nothing, and keeping its
+        // offsets is the falsely-complete state itself. One still on disk keeps its row even with no
+        // events: a transcript that reported nothing is still tracked, and dropping it would make
+        // every later scan reparse it from the start.
         let deleteFiles = try self.prepare(database, """
         DELETE FROM claude_source_files
-        WHERE id NOT IN (SELECT file_id FROM claude_usage_events)\(scope)
+        WHERE source_present = 0
+          AND id NOT IN (SELECT file_id FROM claude_usage_events)\(scope)
         """)
         defer { sqlite3_finalize(deleteFiles) }
         self.bindClaudeRootBounds(bounds, to: deleteFiles, from: 1)

@@ -4,7 +4,9 @@ import Testing
 
 extension CostUsageClaudeResolverTests {
     @Test(arguments: [false, true])
-    func `parser preserves complete rows days and decoded model bytes against scalar pricing`(vertex: Bool) throws {
+    func `parser preserves complete rows days and decoded model bytes with scalar pricing`(
+        vertex: Bool) async throws
+    {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let catalog = try Self.catalog()
@@ -19,7 +21,7 @@ extension CostUsageClaudeResolverTests {
             " \tclaude-test-known\n", "CLAUDE-test-known", "openai/collision", "collision", "claude-test-zero",
         ]
         var expectedRows: [CostUsageScanner.ClaudeUsageRow] = []
-        var expectedDays: [String: [String: [Int]]] = [:]
+        var expectedDays: [String: [String: Int]] = [:]
         var events: [[String: Any]] = []
         for (index, model) in (models + models).enumerated() {
             let timestamp = day.addingTimeInterval(Double(index))
@@ -61,10 +63,7 @@ extension CostUsageClaudeResolverTests {
                 output: output,
                 costNanos: nanos,
                 costPriced: cost != nil))
-            let packedKey = stored
-            let components = [input, 3, 4, output, nanos, 1, cost == nil ? 0 : 1, 2]
-            let previous = expectedDays[dayKey]?[packedKey] ?? Array(repeating: 0, count: 8)
-            expectedDays[dayKey, default: [:]][packedKey] = zip(previous, components).map(+)
+            expectedDays[dayKey, default: [:]][stored, default: 0] += input + 3 + 4 + output
             events.append([
                 "type": "assistant", "timestamp": env.isoString(for: timestamp),
                 "metadata": ["provider": vertex ? "vertex" : "anthropic"],
@@ -87,10 +86,10 @@ extension CostUsageClaudeResolverTests {
         let options = CostUsageScanner.Options(claudeProjectsRoots: [env.claudeProjectsRoot], cacheRoot: env.cacheRoot)
         let report = CostUsageScanner.loadDailyReport(
             provider: provider, since: day, until: day, now: day, options: options)
-        let cache = CostUsageClaudeCacheIO.load(provider: provider, cacheRoot: env.cacheRoot).usage
-        #expect(cache.days == expectedDays)
-        #expect(cache.days[dayKey]?["anthropic.example"] != nil)
-        #expect(cache.files.values.flatMap { $0.claudeRows ?? [] } == expectedRows)
+        let storedDays = await env.storedClaudeDayTotals()
+        #expect(storedDays == expectedDays)
+        #expect(storedDays[dayKey]?["anthropic.example"] != nil)
+        #expect(await env.storedClaudeEvents().facts == expectedRows.facts)
         #expect(report.summary?.totalTokens == expectedRows.reduce(0) {
             $0 + $1.input + $1.cacheRead + $1.cacheCreate + $1.output
         })
@@ -101,7 +100,7 @@ extension CostUsageClaudeResolverTests {
     }
 
     @Test
-    func `raw dated parsing and stored report identity retain distinct catalog prices`() throws {
+    func `raw dated parsing and stored report identity retain distinct catalog prices`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 7, day: 1)
@@ -120,16 +119,16 @@ extension CostUsageClaudeResolverTests {
             try CostUsageScanner.loadDailyReportCancellable(
                 provider: .claude, since: day, until: day, now: day, options: options, checkCancellation: nil)
         }
-        let cache = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: env.cacheRoot).usage
-        #expect(cache.files.count == 1)
-        let cachedPath = try #require(cache.files.keys.first)
-        #expect(URL(fileURLWithPath: cachedPath).resolvingSymlinksInPath() == file.resolvingSymlinksInPath())
-        let rows = try #require(cache.files[cachedPath]?.claudeRows)
+        let files = await env.storedClaudeFiles()
+        #expect(files.count == 1)
+        let storedPath = try #require(files.first?.path)
+        #expect(URL(fileURLWithPath: storedPath).resolvingSymlinksInPath() == file.resolvingSymlinksInPath())
+        let rows = await env.storedClaudeEvents()
         #expect(rows.map(\.model) == ["claude-sonnet-4-5", "claude-sonnet-4-5"])
-        #expect(rows.map(\.costNanos) == rawModels.map {
+        #expect(rows.map(\.ingestCostNanos) == rawModels.map {
             Int(((Self.scalar(catalog, model: $0) ?? 0) * 1_000_000_000).rounded())
         })
-        #expect(rows[0].costNanos != rows[1].costNanos)
+        #expect(rows[0].ingestCostNanos != rows[1].ingestCostNanos)
         #expect(report.summary?.totalCostUSD == Self.scalar(catalog, model: rawModels[1]).map { $0 + $0 })
         #expect(work.snapshot().catalogModelLookups == 2)
         #expect(work.snapshot().normalizationCacheMisses == 2)

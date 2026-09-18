@@ -423,3 +423,15 @@ enum ClaudeStoreFileWrite: Equatable, Sendable {
         return nil
     }
 }
+
+/// One Claude ledger's scan state: the window it has covered and when it last ran.
+///
+/// Replaces the `scanSinceKey` / `scanUntilKey` / `lastScanUnixMs` the JSON artifact used to carry.
+struct ClaudeStoreLedgerState: Equatable, Sendable {
+    var rootsFingerprint: String
+    var scanSinceDay: String
+    var scanUntilDay: String
+    var lastScanMs: Int64
+    /// Advances on every write, so a report memo can tell whether the store moved under it.
+    var generation: Int64
+}

@@ -217,7 +217,7 @@ struct CostUsageCalendarTests {
     }
 
     @Test
-    func `claude and pi caches re-bucket unchanged files when the time zone changes`() throws {
+    func `claude and pi caches re-bucket unchanged files when the time zone changes`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
 
@@ -282,9 +282,7 @@ struct CostUsageCalendarTests {
             options: Self.claudeOptions(env: env, calendar: bangkok))
         #expect(utcClaude.data.map(\.date) == ["2026-07-22"])
         #expect(bangkokClaude.data.map(\.date) == ["2026-07-23"])
-        #expect(CostUsageClaudeCacheIO.load(
-            provider: .claude,
-            cacheRoot: env.cacheRoot).usage.timeZoneIdentifier == "Asia/Bangkok")
+        #expect(await env.storedClaudeFiles().allSatisfy { $0.tzIdentity == "Asia/Bangkok" })
 
         let utcPi = PiSessionCostScanner.loadDailyReport(
             provider: .codex,

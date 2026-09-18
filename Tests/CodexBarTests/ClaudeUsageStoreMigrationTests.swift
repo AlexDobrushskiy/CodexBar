@@ -15,20 +15,58 @@ struct ClaudeUsageStoreMigrationTests {
         CostUsageStore.combinedSchemaVersion(base: base, parserHash: self.parserHash)
     }
 
-    /// A database written by today's code already carries every Claude object, so drop all of them
-    /// to reproduce a genuine v3 database as shipped before this migration existed. The view counts:
-    /// leaving it behind makes the migration's exact `CREATE VIEW` collide and roll back.
-    private static func makeGenuinelyV3(at url: URL) {
+    /// Reproduces the on-disk shape of an older base version.
+    ///
+    /// A database written by today's code already carries every Claude object, so a fixture has to
+    /// undo them one version at a time. Missing any single one makes that version's exact `CREATE`
+    /// collide, roll back and rebuild — which silently drops the rows the test is asserting on, and
+    /// looks like a migration bug rather than a fixture bug. This has bitten three times.
+    private static func makeGenuinely(base: Int, at url: URL) {
         var handle: OpaquePointer?
         #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
         defer { sqlite3_close_v2(handle) }
-        let drops = "DROP VIEW IF EXISTS claude_event_costs;"
-            + "DROP VIEW IF EXISTS claude_reconciled_events;"
-            + "DROP TABLE IF EXISTS claude_usage_events;"
-            + "DROP TABLE IF EXISTS claude_source_files;"
-            + "DROP TABLE IF EXISTS claude_model_prices;"
-        #expect(sqlite3_exec(handle, drops, nil, nil, nil) == SQLITE_OK)
+
+        var steps: [String] = []
+        if base < 7 {
+            steps.append("DROP TABLE IF EXISTS claude_ledger_state;")
+        }
+        if base < 6 {
+            steps.append("ALTER TABLE claude_source_files DROP COLUMN source_present;")
+        }
+        if base < 5 {
+            steps.append("DROP VIEW IF EXISTS claude_event_costs;")
+            steps.append("DROP TABLE IF EXISTS claude_model_prices;")
+            steps.append(Self.v4ModelPricesSQL)
+        }
+        if base < 4 {
+            steps.append("DROP VIEW IF EXISTS claude_reconciled_events;")
+            steps.append("DROP TABLE IF EXISTS claude_usage_events;")
+            steps.append("DROP TABLE IF EXISTS claude_source_files;")
+            steps.append("DROP TABLE IF EXISTS claude_model_prices;")
+        }
+        #expect(sqlite3_exec(handle, steps.joined(), nil, nil, nil) == SQLITE_OK)
     }
+
+    /// v4's price table: no writer, and the wrong column types, which is why v5 replaced it.
+    private static let v4ModelPricesSQL = """
+    CREATE TABLE claude_model_prices (
+        model TEXT NOT NULL,
+        backend TEXT NOT NULL,
+        valid_from TEXT NOT NULL,
+        valid_to TEXT,
+        input_per_mtok REAL NOT NULL,
+        cache_read_per_mtok REAL NOT NULL,
+        cache_write_per_mtok REAL NOT NULL,
+        cache_write_1h_per_mtok REAL NOT NULL,
+        output_per_mtok REAL NOT NULL,
+        long_context_threshold INTEGER,
+        long_context_input_per_mtok REAL,
+        long_context_cache_read_per_mtok REAL,
+        long_context_cache_write_per_mtok REAL,
+        long_context_output_per_mtok REAL,
+        PRIMARY KEY(model, backend, valid_from)
+    );
+    """
 
     private static func codexFile(path: String) -> CostUsageStoreFile {
         CostUsageStoreFile(
@@ -67,7 +105,7 @@ struct ClaudeUsageStoreMigrationTests {
             parserHash: Self.parserHash)
         #expect(await v3.upsertFile(Self.codexFile(path: "/codex/a.jsonl")))
         #expect(await v3.readSnapshot().files.count == 1)
-        Self.makeGenuinelyV3(at: v3.databaseURL)
+        Self.makeGenuinely(base: 3, at: v3.databaseURL)
     }
 
     @Test
@@ -84,15 +122,6 @@ struct ClaudeUsageStoreMigrationTests {
         #expect(await v4.readSnapshot().files.map(\.path) == ["/codex/a.jsonl"])
     }
 
-    /// v5 had nowhere to record that a transcript had left the disk, so it simply dropped the rows.
-    private static func makeGenuinelyV5(at url: URL) {
-        var handle: OpaquePointer?
-        #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
-        defer { sqlite3_close_v2(handle) }
-        let sql = "ALTER TABLE claude_source_files DROP COLUMN source_present"
-        #expect(sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK)
-    }
-
     @Test
     func `migrating to v6 keeps the claude rows and starts them present`() async throws {
         let env = try CostUsageTestEnvironment()
@@ -105,7 +134,7 @@ struct ClaudeUsageStoreMigrationTests {
         #expect(await v5.upsertFile(Self.codexFile(path: "/codex/a.jsonl")))
         let fileID = try #require(await v5.upsertClaudeSourceFile(Self.sourceFile(path: path)))
         #expect(await v5.appendClaudeUsageEvents(fileID: fileID, events: [Self.usageEvent()]))
-        Self.makeGenuinelyV5(at: v5.databaseURL)
+        Self.makeGenuinely(base: 5, at: v5.databaseURL)
 
         let v6 = CostUsageStore(
             cacheRoot: env.cacheRoot,
@@ -116,37 +145,6 @@ struct ClaudeUsageStoreMigrationTests {
         let files = await v6.readClaudeSourceFiles()
         #expect(files.map(\.path) == [path])
         #expect(files.first?.sourcePresent == true, "everything already tracked is still on disk")
-    }
-
-    /// v4 shipped `claude_model_prices` with no writer and the wrong column types, so v5 replaces
-    /// it outright. Reproduce that exact shape, including the missing cost view and v6 column.
-    private static func makeGenuinelyV4(at url: URL) {
-        var handle: OpaquePointer?
-        #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
-        defer { sqlite3_close_v2(handle) }
-        Self.makeGenuinelyV5(at: url)
-        let sql = "DROP VIEW IF EXISTS claude_event_costs;"
-            + "DROP TABLE IF EXISTS claude_model_prices;"
-            + """
-            CREATE TABLE claude_model_prices (
-                model TEXT NOT NULL,
-                backend TEXT NOT NULL,
-                valid_from TEXT NOT NULL,
-                valid_to TEXT,
-                input_per_mtok REAL NOT NULL,
-                cache_read_per_mtok REAL NOT NULL,
-                cache_write_per_mtok REAL NOT NULL,
-                cache_write_1h_per_mtok REAL NOT NULL,
-                output_per_mtok REAL NOT NULL,
-                long_context_threshold INTEGER,
-                long_context_input_per_mtok REAL,
-                long_context_cache_read_per_mtok REAL,
-                long_context_cache_write_per_mtok REAL,
-                long_context_output_per_mtok REAL,
-                PRIMARY KEY(model, backend, valid_from)
-            );
-            """
-        #expect(sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK)
     }
 
     @Test
@@ -161,7 +159,7 @@ struct ClaudeUsageStoreMigrationTests {
         #expect(await v4.upsertFile(Self.codexFile(path: "/codex/a.jsonl")))
         let fileID = try #require(await v4.upsertClaudeSourceFile(Self.sourceFile(path: path)))
         #expect(await v4.appendClaudeUsageEvents(fileID: fileID, events: [Self.usageEvent()]))
-        Self.makeGenuinelyV4(at: v4.databaseURL)
+        Self.makeGenuinely(base: 4, at: v4.databaseURL)
 
         let v5 = CostUsageStore(
             cacheRoot: env.cacheRoot,

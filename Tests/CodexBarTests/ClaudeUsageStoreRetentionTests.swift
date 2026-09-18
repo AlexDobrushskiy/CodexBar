@@ -81,20 +81,25 @@ struct ClaudeUsageStoreRetentionTests {
         #expect(stored.coverageUntilDay == "2026-09-17")
     }
 
-    /// A transcript with nothing left in the window describes nothing, and keeping its offsets is
-    /// the falsely-complete state itself.
+    /// An archived transcript with nothing left in the window describes nothing, and keeping its
+    /// offsets is the falsely-complete state itself. One still on disk keeps its row: it is still
+    /// tracked, and dropping it would make every later scan reparse it from the start.
     @Test
-    func `a file left with no events in the window is dropped`() async throws {
+    func `an archived file left with no events in the window is dropped`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let store = CostUsageStore(cacheRoot: env.cacheRoot)
-        try await Self.seed(store, path: "/roots/p/old.jsonl", days: ["2026-01-01"])
+        try await Self.seed(store, path: "/roots/p/gone.jsonl", days: ["2026-01-01"])
+        try await Self.seed(store, path: "/roots/p/onDisk.jsonl", days: ["2026-01-01"])
         try await Self.seed(store, path: "/roots/p/new.jsonl", days: ["2026-09-17"])
+        #expect(await store.markClaudeSourceMissing(path: "/roots/p/gone.jsonl"))
 
         let result = await store.retainClaudeDayWindow(sinceDay: "2026-09-01", untilDay: "2026-09-30")
 
         #expect(result.deletedSourceFiles == 1)
-        #expect(await store.readClaudeSourceFiles().map(\.path) == ["/roots/p/new.jsonl"])
+        #expect(
+            await store.readClaudeSourceFiles().map(\.path)
+                == ["/roots/p/new.jsonl", "/roots/p/onDisk.jsonl"])
     }
 
     /// The store is global; a ledger is not. A profile's prune may not evict another profile's rows.
@@ -105,6 +110,8 @@ struct ClaudeUsageStoreRetentionTests {
         let store = CostUsageStore(cacheRoot: env.cacheRoot)
         try await Self.seed(store, path: "/roots/a/s.jsonl", days: ["2026-01-01"])
         try await Self.seed(store, path: "/roots/b/s.jsonl", days: ["2026-01-01"])
+        #expect(await store.markClaudeSourceMissing(path: "/roots/a/s.jsonl"))
+        #expect(await store.markClaudeSourceMissing(path: "/roots/b/s.jsonl"))
 
         let result = await store.retainClaudeDayWindow(
             sinceDay: "2026-09-01",

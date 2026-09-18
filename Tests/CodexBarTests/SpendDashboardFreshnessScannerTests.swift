@@ -38,9 +38,8 @@ struct SpendDashboardFreshnessScannerTests {
         #expect(fixture.store.tokenSnapshot(for: .claude)?.historyDays == 30)
 
         // Claude persists a report memo. Evict the in-memory copy and prove a cold read reuses it
-        // without decoding the JSON cache or parsing transcripts.
-        let cacheURL = CostUsageClaudeCacheIO.cacheFileURL(provider: .claude, cacheRoot: fixture.env.cacheRoot)
-        #expect(FileManager.default.fileExists(atPath: cacheURL.path))
+        // without re-reading the store or parsing transcripts. That the scan ran at all is already
+        // established by the shared-spend assertions above.
         CostUsageScanner.evictClaudeReportMemoForTesting(provider: .claude, cacheRoot: fixture.env.cacheRoot)
         let beforeCold = scanner.recorder.snapshot()
         let cold = try await scanner.load(days: 365)

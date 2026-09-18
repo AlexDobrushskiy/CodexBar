@@ -128,8 +128,10 @@ struct CostUsageClaudeKimiAliasTests {
             catalog: Self.catalog([:]), fetchedAt: fixture.day, cacheRoot: fixture.environment.cacheRoot))
         let first = try #require(fixture.report().data.first?.modelBreakdowns?.first)
         #expect(first.costUSD == nil)
-        let cacheURL = CostUsageClaudeCacheIO.cacheFileURL(provider: .claude, cacheRoot: fixture.environment.cacheRoot)
-        let cacheBefore = try Data(contentsOf: cacheURL)
+        // Repricing must not re-run the scan, which the store's ledger generation records.
+        let generationBefore = CostUsageScanner.claudeLedgerGenerationForTesting(
+            roots: [fixture.environment.claudeProjectsRoot],
+            cacheRoot: fixture.environment.cacheRoot)
         #expect(try ModelsDevCache.save(
             catalog: Self.catalog(["kimi-for-coding": ["k3": Self.rates]]),
             fetchedAt: fixture.day.addingTimeInterval(1),
@@ -152,7 +154,9 @@ struct CostUsageClaudeKimiAliasTests {
             #expect(metrics.transcriptParses == 0)
             #expect(metrics.cacheEncodes == 0)
             #expect(metrics.repricedRows == (cold ? 0 : 1))
-            #expect(try Data(contentsOf: cacheURL) == cacheBefore)
+            #expect(CostUsageScanner.claudeLedgerGenerationForTesting(
+                roots: [fixture.environment.claudeProjectsRoot],
+                cacheRoot: fixture.environment.cacheRoot) == generationBefore)
         }
     }
 

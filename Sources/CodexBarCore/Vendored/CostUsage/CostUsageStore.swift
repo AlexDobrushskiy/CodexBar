@@ -74,7 +74,7 @@ actor CostUsageStore {
 
     static let log = CodexBarLog.logger(LogCategories.tokenCost)
     static let databaseFilename = "cost-usage.sqlite"
-    static let baseSchemaVersion = 6
+    static let baseSchemaVersion = 7
     static let schemaVersion = CostUsageStore.combinedSchemaVersion(
         base: CostUsageStore.baseSchemaVersion,
         parserHash: CodexParserHash.value)
@@ -657,6 +657,9 @@ extension CostUsageStore {
         if storedBase < 4 {
             try Self.execute(database, Self.claudeSchemaSQL)
         }
+        if storedBase < 7 {
+            try Self.execute(database, Self.claudeLedgerSchemaSQL)
+        }
         if storedBase >= 4, storedBase < 6 {
             // Claude Code rotates transcripts and projects get deleted. The store is a usage
             // record, so a file leaving the disk is recorded rather than erased; v4 and v5 had
@@ -727,6 +730,7 @@ extension CostUsageStore {
         try Self.execute(database, Self.schemaSQL)
         try Self.execute(database, Self.claudeSchemaSQL)
         try Self.execute(database, Self.claudePricingSchemaSQL)
+        try Self.execute(database, Self.claudeLedgerSchemaSQL)
         try Self.execute(database, "PRAGMA user_version = \(self.expectedSchemaVersion)")
         let statement = try Self.prepare(database, "INSERT INTO meta(key, value) VALUES ('parser_hash', ?)")
         defer { sqlite3_finalize(statement) }
@@ -858,6 +862,23 @@ extension CostUsageStore {
         WHERE e.message_id IS NOT NULL AND e.request_id IS NOT NULL
     )
     WHERE rank_in_group = 1;
+    """
+
+    /// Per-ledger scan state, added in v7, so the store can be the scan state instead of a JSON
+    /// artifact beside it.
+    ///
+    /// Keyed by the ledger's roots rather than by provider: what a scan covers is decided by the
+    /// directories it walks, and Claude, Vertex and Bedrock over the same roots are one scan.
+    /// `generation` advances on every write and is what report memos key on, replacing the mtime of
+    /// the artifact that used to sit there.
+    static let claudeLedgerSchemaSQL = """
+    CREATE TABLE claude_ledger_state (
+        roots_fingerprint TEXT PRIMARY KEY,
+        scan_since_day TEXT NOT NULL,
+        scan_until_day TEXT NOT NULL,
+        last_scan_ms INTEGER NOT NULL,
+        generation INTEGER NOT NULL
+    );
     """
 
     /// Claude pricing and the cost view, added in v5.

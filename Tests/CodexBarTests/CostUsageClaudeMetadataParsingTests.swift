@@ -4,7 +4,7 @@ import Testing
 
 struct CostUsageClaudeMetadataParsingTests {
     @Test(arguments: [false, true])
-    func `decoded scalar coercion and session fallback preserve complete rows`(vertex: Bool) throws {
+    func `decoded scalar coercion and session fallback preserve complete rows`(vertex: Bool) async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 8, day: 29)
@@ -81,13 +81,13 @@ struct CostUsageClaudeMetadataParsingTests {
         let options = CostUsageScanner.Options(claudeProjectsRoots: [env.claudeProjectsRoot], cacheRoot: env.cacheRoot)
         let report = CostUsageScanner.loadDailyReport(
             provider: provider, since: day, until: day, now: day, options: options)
-        let cache = CostUsageClaudeCacheIO.load(provider: provider, cacheRoot: env.cacheRoot).usage
-        #expect(cache.files.values.flatMap { $0.claudeRows ?? [] } == expectedRows)
-        #expect(cache.files.values.map(\.parsedBytes) == [parsed.parsedBytes])
+        let stored = await env.storedClaudeEvents()
+        #expect(stored.facts == expectedRows.facts)
+        #expect(await env.storedClaudeFiles().map(\.parsedOffset) == [parsed.parsedBytes])
         #expect(report.summary?.totalTokens == 32)
         #expect(report.summary?.totalCostUSD == nil)
-        #expect(cache.days[dayKey]?.values.reduce(0) { $0 + $1[5] } == 7)
-        #expect(cache.days[dayKey]?.values.allSatisfy { $0[6] == 0 } == true)
+        #expect(stored.filter { $0.day == dayKey }.count == 7)
+        #expect(stored.allSatisfy { !$0.ingestCostPriced })
     }
 
     @Test

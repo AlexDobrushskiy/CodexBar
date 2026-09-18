@@ -130,7 +130,7 @@ struct CostUsageClaudeVertexClassifierTests {
     }
 
     @Test
-    func `Claude and Vertex ingestion preserve historical rows days tokens and costs`() throws {
+    func `Claude and Vertex ingestion preserve historical rows days tokens and costs`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         var calendar = Calendar(identifier: .gregorian)
@@ -203,19 +203,19 @@ struct CostUsageClaudeVertexClassifierTests {
             options.refreshMinIntervalSeconds = 0
             let actualReport = CostUsageScanner.loadDailyReport(
                 provider: provider, since: since, until: until, now: until, options: options)
-            let actualCache = CostUsageClaudeCacheIO.load(provider: provider, cacheRoot: options.cacheRoot).usage
-            #expect(actualCache.days.count == 3)
-            #expect(actualCache.files.values.contains { $0.claudeRows == actual.rows })
-            #expect(actualCache.files.count == 2)
+            // A filtered scan persists nothing: it parses into memory precisely so it cannot leave
+            // a partial row set for an unfiltered scan to trip over.
+            #expect(await CostUsageStore(cacheRoot: options.cacheRoot).readClaudeSourceFiles().isEmpty)
+
             options.claudeProjectsRoots = [expectedFile.deletingLastPathComponent()]
             options.cacheRoot = env.cacheRoot.appendingPathComponent("expected-\(name)")
             options.claudeLogProviderFilter = .all
             let expectedReport = CostUsageScanner.loadDailyReport(
                 provider: .claude, since: since, until: until, now: until, options: options)
-            let expectedCache = CostUsageClaudeCacheIO.load(provider: .claude, cacheRoot: options.cacheRoot).usage
-            #expect(actualCache.days == expectedCache.days)
-            #expect(actualCache.files.values.contains { $0.parsedBytes == actual.parsedBytes })
-            #expect(expectedCache.files.values.map(\.parsedBytes) == [expected.parsedBytes])
+            let storedFiles = await CostUsageStore(cacheRoot: options.cacheRoot).readClaudeSourceFiles()
+            #expect(storedFiles.map(\.parsedOffset) == [expected.parsedBytes])
+            // The point of the whole fixture: one ledger's filtered scan and an unfiltered scan of
+            // exactly that ledger's rows report the same thing.
             #expect(actualReport.data == expectedReport.data)
             #expect(actualReport.summary == expectedReport.summary)
         }

@@ -167,14 +167,41 @@ view behind on the v3 path. There is a regression test for exactly that.
 Note that a clean `PRAGMA foreign_key_check` returns **no rows**, so it must be stepped directly —
 `scalarText` treats `SQLITE_DONE` as a failure.
 
+## The store is the scan state
+
+There is no `claude-v6.json` any more. `claude_source_files` already carried every field the
+artifact did — identity, size, mtime, parsed offset, coverage, parser revision, time zone — and
+`claude_ledger_state` (v7) carries the rest: the window a ledger has covered, when it last ran, and
+a `generation` that advances on every commit. Report memos key on that generation, replacing the
+artifact mtime they used to watch. A ledger is one set of roots, not one provider: Claude, Vertex
+and Bedrock over the same roots are one scan.
+
+The artifacts were deleted once the store committed a complete replacement, which is the condition
+their removal was always gated on. They had become three copies of the same data — two 85 MB JSON
+files holding every backend's rows plus the 64 MB database — because making the scan unfiltered
+meant each provider's artifact accumulated the whole vault.
+
+### One window per ledger, not per caller
+
+A scan parses over the window the *ledger* retains, not the one its caller asked for, and prunes to
+the same. Both follow from replacement being all-or-nothing for a file: re-parsing a transcript into
+a narrower window and replacing its events would drop every day outside that window, and nothing
+would restore them because the file itself never changed. A 30-minute refresh asking for 30 days and
+a dashboard asking for 365 share one ledger, and the narrow one must not evict the wide one's
+history. The retained window therefore only ever widens, through `MIN`/`MAX` on the ledger row.
+
 ## Only unfiltered scans may write
 
 The mirror from a scan into the store runs **only when `claudeLogProviderFilter == .all`**.
 
-A provider-scoped scan parses just the rows its filter admits. Because the mirror replaces a file's
-events, storing a filtered scan would persist a partial row set, and a later scan for a different
-backend would swap those rows out entirely. The store holds every backend; the ledger split is a
-`WHERE` clause over `backend`.
+A provider-scoped scan parses just the rows its filter admits. Because a file write replaces that
+file's events, storing a filtered scan would persist a partial row set, and a later scan for a
+different backend would swap those rows out entirely. The store holds every backend; the ledger
+split is a `WHERE` clause over `backend`.
+
+Such a scan therefore keeps nothing at all: it parses into memory and answers from that, with no
+incremental offset to resume from and nothing left behind. Only tests and diagnostics take that
+path; production always scans unfiltered.
 
 ## Scanning and reporting are separate scopes
 
@@ -228,7 +255,8 @@ fully covered yet.
 Landed: the schema and migrations, event storage, the reconciliation view, the parser detail fields,
 the scan→store mirror, the unified read path — Claude, Vertex and Bedrock reports are now built from
 the store — the price catalog with its cost view, which every report now reads its costs from, and
-the concurrency, retention, coverage, time-zone and re-stat invariants above.
+the concurrency, retention, coverage, time-zone and re-stat invariants above, and the retirement of
+the JSON artifacts, which leaves the store as the only Claude scan state.
 
 ### Verified against the real vault
 
@@ -247,10 +275,7 @@ The Bedrock ledger reported 12,055,913,128 tokens and $15,300.566024449987 — i
 previous filtered-scan artifact held, so neither the read-path unification nor moving pricing into a
 view changed a real number.
 
-Not yet landed: backend-aware pricing (Bedrock rows still price against the first-party catalog
-even though models.dev carries an `amazon-bedrock` provider) and retirement of the
-`claude-v6.json` / `bedrock-v6.json` artifacts, which are still the incremental parse state. Each provider keeps its own artifact, so the first scan after this change
-re-parses once per enabled Claude-family provider; the store write itself is skipped for files whose
-recorded state has not moved.
+Not yet landed: backend-aware pricing — Bedrock rows still price against the first-party catalog
+even though models.dev carries an `amazon-bedrock` provider, and Vertex rows likewise.
 
 Design notes: `docs/superpowers/specs/2026-09-17-claude-usage-store-design.md`.
