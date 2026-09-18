@@ -32,8 +32,9 @@ extension CostUsageStore {
         let statement = try Self.prepare(database, """
         INSERT INTO claude_source_files(
             path, path_sort_key, file_identity, size, mtime_ms, parsed_offset,
-            coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete,
+            source_present)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(path) DO UPDATE SET
             path_sort_key = excluded.path_sort_key,
             file_identity = excluded.file_identity,
@@ -44,7 +45,8 @@ extension CostUsageStore {
             coverage_until_day = excluded.coverage_until_day,
             parser_revision = excluded.parser_revision,
             tz_identity = excluded.tz_identity,
-            complete = excluded.complete
+            complete = excluded.complete,
+            source_present = excluded.source_present
         """)
         defer { sqlite3_finalize(statement) }
         Self.bind(file.path, to: statement, at: 1)
@@ -58,6 +60,7 @@ extension CostUsageStore {
         Self.bind(Int64(file.parserRevision), to: statement, at: 9)
         Self.bind(file.tzIdentity, to: statement, at: 10)
         Self.bind(file.complete ? Int64(1) : Int64(0), to: statement, at: 11)
+        Self.bind(file.sourcePresent ? Int64(1) : Int64(0), to: statement, at: 12)
         try Self.stepDone(statement, database: database)
     }
 
@@ -122,7 +125,8 @@ extension CostUsageStore {
     {
         let statement = try Self.prepare(database, """
         SELECT path, file_identity, size, mtime_ms, parsed_offset,
-               coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete
+               coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete,
+               source_present
         FROM claude_source_files WHERE path = ?
         """)
         defer { sqlite3_finalize(statement) }
@@ -149,7 +153,8 @@ extension CostUsageStore {
         self.withDatabase(default: []) { database in
             let statement = try Self.prepare(database, """
             SELECT path, file_identity, size, mtime_ms, parsed_offset,
-                   coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete
+                   coverage_since_day, coverage_until_day, parser_revision, tz_identity, complete,
+                   source_present
             FROM claude_source_files
             ORDER BY path_sort_key
             """)
@@ -166,7 +171,8 @@ extension CostUsageStore {
                     coverageUntilDay: Self.columnText(statement, at: 6),
                     parserRevision: Int(sqlite3_column_int64(statement, 7)),
                     tzIdentity: Self.columnText(statement, at: 8) ?? "",
-                    complete: sqlite3_column_int64(statement, 9) != 0))
+                    complete: sqlite3_column_int64(statement, 9) != 0,
+                    sourcePresent: sqlite3_column_int64(statement, 10) != 0))
             }
             return files
         }
@@ -264,6 +270,19 @@ extension CostUsageStore {
                     ingestCostPriced: sqlite3_column_int64(statement, 24) != 0))
             }
             return events
+        }
+    }
+
+    /// Records that a transcript is no longer on disk, keeping the usage it already reported.
+    func markClaudeSourceMissing(path: String) -> Bool {
+        self.withDatabase(default: false) { database in
+            let statement = try Self.prepare(
+                database,
+                "UPDATE claude_source_files SET source_present = 0 WHERE path = ?")
+            defer { sqlite3_finalize(statement) }
+            Self.bind(path, to: statement, at: 1)
+            try Self.stepDone(statement, database: database)
+            return true
         }
     }
 
@@ -534,6 +553,10 @@ extension CostUsageStore {
         self.syncWithStoreIsolation {
             $0.retainClaudeDayWindow(sinceDay: sinceDay, untilDay: untilDay, roots: roots)
         }
+    }
+
+    nonisolated func syncMarkClaudeSourceMissing(path: String) -> Bool {
+        self.syncWithStoreIsolation { $0.markClaudeSourceMissing(path: path) }
     }
 
     nonisolated func syncDeleteClaudeSourceFile(path: String) -> Bool {

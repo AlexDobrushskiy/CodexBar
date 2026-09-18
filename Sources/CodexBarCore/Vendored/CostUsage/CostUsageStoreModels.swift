@@ -278,6 +278,9 @@ struct ClaudeStoreSourceFile: Codable, Equatable, Sendable {
     /// Calendar identity the `day` column was bucketed under; `day` is not timeless.
     var tzIdentity: String
     var complete: Bool
+    /// Whether the transcript is still on disk. A file that has gone keeps its events — the store
+    /// is a usage record, not a mirror — and is removed only when the day window prunes them.
+    var sourcePresent = true
 }
 
 /// One reconciled Claude usage row.

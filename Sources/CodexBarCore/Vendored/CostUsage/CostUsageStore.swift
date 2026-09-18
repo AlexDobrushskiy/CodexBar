@@ -74,7 +74,7 @@ actor CostUsageStore {
 
     static let log = CodexBarLog.logger(LogCategories.tokenCost)
     static let databaseFilename = "cost-usage.sqlite"
-    static let baseSchemaVersion = 5
+    static let baseSchemaVersion = 6
     static let schemaVersion = CostUsageStore.combinedSchemaVersion(
         base: CostUsageStore.baseSchemaVersion,
         parserHash: CodexParserHash.value)
@@ -657,6 +657,14 @@ extension CostUsageStore {
         if storedBase < 4 {
             try Self.execute(database, Self.claudeSchemaSQL)
         }
+        if storedBase >= 4, storedBase < 6 {
+            // Claude Code rotates transcripts and projects get deleted. The store is a usage
+            // record, so a file leaving the disk is recorded rather than erased; v4 and v5 had
+            // nowhere to record it and simply dropped the rows.
+            try Self.execute(
+                database,
+                "ALTER TABLE claude_source_files ADD COLUMN source_present INTEGER NOT NULL DEFAULT 1")
+        }
         if storedBase < 5 {
             // v4 shipped an empty `claude_model_prices` with no writer and the wrong column types;
             // nothing can be carried across, so it is replaced rather than altered.
@@ -788,7 +796,8 @@ extension CostUsageStore {
         coverage_until_day TEXT,
         parser_revision INTEGER NOT NULL,
         tz_identity TEXT NOT NULL,
-        complete INTEGER NOT NULL
+        complete INTEGER NOT NULL,
+        source_present INTEGER NOT NULL
     );
     CREATE INDEX claude_source_files_coverage_idx
         ON claude_source_files(coverage_since_day, coverage_until_day);

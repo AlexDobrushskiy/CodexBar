@@ -256,8 +256,10 @@ struct CostUsageScannerClaudeMemoTests {
         #expect(metrics.cacheEncodes == 1)
     }
 
+    /// Deleting a transcript invalidates the memo and drops it from the cache, but the store keeps
+    /// what it already reported: the usage was really spent, and the store is the only copy of it.
     @Test
-    func `individual source deletion invalidates the memo and removes its rows`() throws {
+    func `individual source deletion invalidates the memo and archives its rows`() throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 7, day: 4)
@@ -279,14 +281,16 @@ struct CostUsageScannerClaudeMemoTests {
 
         let (report, metrics) = self.recordedLoad(day: day, options: options)
 
-        #expect(report.summary?.totalInputTokens == 20)
+        #expect(report.summary?.totalInputTokens == 30, "10 archived plus 20 still on disk")
         #expect(metrics.cacheDecodes == 1)
         #expect(metrics.transcriptParses == 0)
         #expect(metrics.cacheEncodes == 1)
     }
 
+    /// Same rule when the whole root goes: the ledger still exists as configuration, so its history
+    /// is reported until the day window prunes it.
     @Test
-    func `missing source root invalidates the memo and deletes cached rows`() throws {
+    func `missing source root invalidates the memo and archives cached rows`() throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let day = try env.makeLocalNoon(year: 2026, month: 7, day: 4)
@@ -297,7 +301,7 @@ struct CostUsageScannerClaudeMemoTests {
 
         let (report, metrics) = self.recordedLoad(day: day, options: options)
 
-        #expect(report.data.isEmpty)
+        #expect(report.summary?.totalInputTokens == 10)
         #expect(metrics.cacheDecodes == 1)
         #expect(metrics.transcriptParses == 0)
         #expect(metrics.cacheEncodes == 1)

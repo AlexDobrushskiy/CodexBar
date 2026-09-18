@@ -1242,11 +1242,14 @@ extension CostUsageScanner {
             }
         }
 
-        for (path, _) in stored where cache.files[path] == nil {
-            // A profile-scoped scan walks part of the vault. Evicting rows for transcripts outside
-            // the roots it inventoried would delete another ledger's usage.
+        for (path, file) in stored where cache.files[path] == nil {
+            // A profile-scoped scan walks part of the vault, so a transcript missing from this
+            // scan's inventory may simply belong to another ledger.
             guard Self.claudePath(path, isUnder: ledger.roots) else { continue }
-            _ = store.syncDeleteClaudeSourceFile(path: path)
+            guard file.sourcePresent else { continue }
+            // Recorded, not erased: the usage was really spent, and once the JSON artifacts retire
+            // this row is the only copy. Retention removes it when its days age out.
+            _ = store.syncMarkClaudeSourceMissing(path: path)
         }
 
         // Nothing else bounds these tables. Rows for days this scan no longer covers would

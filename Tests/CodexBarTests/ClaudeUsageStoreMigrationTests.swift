@@ -84,12 +84,47 @@ struct ClaudeUsageStoreMigrationTests {
         #expect(await v4.readSnapshot().files.map(\.path) == ["/codex/a.jsonl"])
     }
 
+    /// v5 had nowhere to record that a transcript had left the disk, so it simply dropped the rows.
+    private static func makeGenuinelyV5(at url: URL) {
+        var handle: OpaquePointer?
+        #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        defer { sqlite3_close_v2(handle) }
+        let sql = "ALTER TABLE claude_source_files DROP COLUMN source_present"
+        #expect(sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK)
+    }
+
+    @Test
+    func `migrating to v6 keeps the claude rows and starts them present`() async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let path = "/Users/alex/.claude/projects/-p/s.jsonl"
+        let v5 = CostUsageStore(
+            cacheRoot: env.cacheRoot,
+            schemaVersion: Self.version(base: 5),
+            parserHash: Self.parserHash)
+        #expect(await v5.upsertFile(Self.codexFile(path: "/codex/a.jsonl")))
+        let fileID = try #require(await v5.upsertClaudeSourceFile(Self.sourceFile(path: path)))
+        #expect(await v5.appendClaudeUsageEvents(fileID: fileID, events: [Self.usageEvent()]))
+        Self.makeGenuinelyV5(at: v5.databaseURL)
+
+        let v6 = CostUsageStore(
+            cacheRoot: env.cacheRoot,
+            schemaVersion: Self.version(base: 6),
+            parserHash: Self.parserHash)
+
+        #expect(await v6.readSnapshot().files.map(\.path) == ["/codex/a.jsonl"])
+        let files = await v6.readClaudeSourceFiles()
+        #expect(files.map(\.path) == [path])
+        #expect(files.first?.sourcePresent == true, "everything already tracked is still on disk")
+    }
+
     /// v4 shipped `claude_model_prices` with no writer and the wrong column types, so v5 replaces
-    /// it outright. Reproduce that exact shape, including the missing cost view.
+    /// it outright. Reproduce that exact shape, including the missing cost view and v6 column.
     private static func makeGenuinelyV4(at url: URL) {
         var handle: OpaquePointer?
         #expect(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
         defer { sqlite3_close_v2(handle) }
+        Self.makeGenuinelyV5(at: url)
         let sql = "DROP VIEW IF EXISTS claude_event_costs;"
             + "DROP TABLE IF EXISTS claude_model_prices;"
             + """

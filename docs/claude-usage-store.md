@@ -60,7 +60,8 @@ cascades on delete, and `retainDayWindow` prunes it using Codex coverage and for
 events hung off that table would be deleted by Codex retention.
 
 Columns: `path`, `path_sort_key`, `file_identity`, `size`, `mtime_ms`, `parsed_offset`,
-`coverage_since_day`, `coverage_until_day`, `parser_revision`, `tz_identity`, `complete`.
+`coverage_since_day`, `coverage_until_day`, `parser_revision`, `tz_identity`, `complete`,
+`source_present`.
 
 ### `claude_usage_events`
 
@@ -205,6 +206,13 @@ while keeping EOF offsets is what would make a later, wider window look falsely 
 coverage is clamped to what survived and `claudeSourceFilesNeedingReparse` names the files that can
 no longer answer for an earlier day. A file left with nothing in the window is dropped outright:
 keeping its offsets *is* the falsely-complete state.
+
+**Archive, not mirror.** A transcript that leaves the disk is recorded as gone
+(`source_present = 0`) and keeps the usage it already reported; the store is a usage record, and
+once the JSON artifacts retire it is the only copy. Deleting a project therefore no longer reduces
+reported usage, and a ledger whose root has vanished still reports its history until the day window
+prunes it. A transcript restored at the same path cannot double-count: a changed identity replaces
+that file's events, and a copy appearing at a new path is deduplicated by the reconciliation view.
 
 **Time zone.** `day` is local-calendar derived and therefore not timeless. `tz_identity` records the
 calendar each row was bucketed under, and because the sync compares the whole recorded file state,
