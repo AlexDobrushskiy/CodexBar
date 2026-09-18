@@ -260,16 +260,25 @@ the JSON artifacts, which leaves the store as the only Claude scan state.
 
 ### Verified against the real vault
 
-A live v3 database (613 Codex files, 13,543 usage rows, no Claude tables) migrated straight to v5
-and kept every Codex row. One unfiltered scan then stored 1,941 transcripts and 146,101 events, and
-both ledgers were read back out of it.
+A live v3 database (613 Codex files, 13,543 usage rows, no Claude tables) migrated straight through
+to v7 and kept every Codex row. One unfiltered scan stores 1,997 transcripts and 149,100 events, and
+every ledger is read back out of it.
+
+Retiring the artifacts took the cache directory from 254 MB to 81 MB. A 30-day scan wrote a 30-day
+ledger; asking for 365 days afterwards widened the window and reparsed the history back in, from
+2026-08-19 to 2026-04-24, which is the widening path working on real data rather than in a fixture.
 
 `Scripts/claude_usage_store_oracle.py` is the oracle: it re-reads the transcripts, redoes both
 reconciliation stages and sums the tokens itself, touching no CodexBar code, because the app's own
-numbers cannot be their own oracle. Run immediately after a refresh it agreed exactly — 146,101 rows
-and 23,494,953,194 tokens on both sides, with all 29 days matching. Its one deliberate
-simplification is that it does not reproduce the recursive Vertex metadata walk, so the 3,034,110
-tokens the app attributes to Vertex land in its first-party column and cancel exactly.
+numbers cannot be their own oracle. Run immediately after a refresh it agrees exactly — 1,997
+transcripts and 149,100 events over 37 days, with only the current day drifting by the rows written
+between the scan and the oracle. Its one deliberate simplification is that it does not reproduce the
+recursive Vertex metadata walk, so the tokens the app attributes to Vertex land in its first-party
+column and cancel exactly.
+
+Pass it every root the ledger covers, which is what it now defaults to. Claude Desktop keeps
+per-session transcripts under `Library/Application Support/Claude/local-agent-mode-sessions`, and
+running the oracle against `~/.claude/projects` alone makes the store look like it invented rows.
 
 The Bedrock ledger reported 12,055,913,128 tokens and $15,300.566024449987 — identical to what the
 previous filtered-scan artifact held, so neither the read-path unification nor moving pricing into a

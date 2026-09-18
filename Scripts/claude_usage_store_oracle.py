@@ -125,12 +125,36 @@ def reconcile(paths):
     return rows
 
 
+def default_roots():
+    """Every root the scanner walks, not just ~/.claude/projects.
+
+    Claude Desktop keeps per-session transcripts of its own, and passing only the obvious root
+    makes the store look like it invented rows.
+    """
+    home = os.path.expanduser("~")
+    roots = [
+        os.path.join(home, ".claude/projects"),
+        os.path.join(home, ".config/claude/projects"),
+    ]
+    desktop = os.path.join(home, "Library/Application Support/Claude/local-agent-mode-sessions")
+    for workspace, session, local in (
+        (w, s, l)
+        for w in sorted(os.listdir(desktop)) if os.path.isdir(os.path.join(desktop, w))
+        for s in sorted(os.listdir(os.path.join(desktop, w)))
+        for l in sorted(os.listdir(os.path.join(desktop, w, s)))
+    ) if os.path.isdir(desktop) else ():
+        candidate = os.path.join(desktop, workspace, session, local, ".claude/projects")
+        if os.path.isdir(candidate):
+            roots.append(candidate)
+    return [root for root in roots if os.path.isdir(root)]
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
     database = sys.argv[1]
-    roots = sys.argv[2:] or [os.path.expanduser("~/.claude/projects")]
+    roots = sys.argv[2:] or default_roots()
 
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     stored_paths = [row[0] for row in connection.execute("SELECT path FROM claude_source_files")]
