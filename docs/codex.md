@@ -243,7 +243,9 @@ is limited, using additional rows when needed.
   - Native conversation rows reuse the corrected cached per-file totals and existing pricing tables. They are hidden
     when pi-compatible usage joins the aggregate because the native-only rows would not reconcile with the merged total.
 - Cache:
-  - Native session store: `~/Library/Caches/CodexBar/cost-usage/cost-usage.sqlite`
+  - Native session store: `~/Library/Caches/CodexBar/cost-usage/cost-usage.sqlite` — table-by-table
+    reference and query recipes in
+    [`cost-usage-store-schema.md`](cost-usage-store-schema.md)
   - pi-compatible session cache: `~/Library/Caches/CodexBar/cost-usage/pi-sessions-v8.json`
     is replaced atomically on macOS and Linux, retaining complete cached scan state across refreshes.
   - Catch-up status reads progress metadata without loading historical usage JSON or replay bodies. Cached token

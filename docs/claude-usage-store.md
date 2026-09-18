@@ -20,6 +20,9 @@ clauses over its `backend` column.
 
 ## Querying it
 
+Full table-by-table reference, including the Codex half of the same database:
+[`cost-usage-store-schema.md`](cost-usage-store-schema.md). The short version:
+
 The database is `~/Library/Caches/CodexBar/cost-usage/cost-usage.sqlite`. Read it with `sqlite3`
 directly; the app holds a WAL connection, so a reader sees a consistent snapshot without waiting.
 
@@ -93,6 +96,10 @@ entirely from local files. The probe is bounded (newest transcripts first, cappe
 first-hit exit) and runs behind the provider availability TTL cache.
 
 ## Schema (v7)
+
+Column-level reference for every table, Codex and Claude, is in
+[`cost-usage-store-schema.md`](cost-usage-store-schema.md). This section covers why the Claude
+tables have the shape they do.
 
 ### `claude_source_files`
 

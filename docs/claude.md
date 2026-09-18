@@ -309,7 +309,8 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
 - Scan state:
   - `~/Library/Caches/CodexBar/cost-usage/cost-usage.sqlite` — per-event rows, per-file parse offsets
     and identities, and per-ledger scan windows. There is no Claude JSON cache any more; see
-    [`claude-usage-store.md`](claude-usage-store.md).
+    [`claude-usage-store.md`](claude-usage-store.md) for the design and
+    [`cost-usage-store-schema.md`](cost-usage-store-schema.md) for the tables and how to query them.
   - Report memo: `~/Library/Caches/CodexBar/cost-usage/<provider>-ledger.report-memo.json` stores
     source stamps and the daily report across launches. It is reused only while transcript
     inventory, store generation, pricing artifact, requested window, and report-semantics revision
