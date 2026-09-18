@@ -9,8 +9,8 @@ read_when:
 
 # Claude provider
 
-> Backend attribution (first-party vs Vertex vs Bedrock) and the SQLite usage store that
-> supersedes the day×model JSON artifact are documented in
+> Backend attribution (first-party vs Vertex vs Bedrock), the SQLite usage store that is now the
+> whole Claude scan state, and how to query it are documented in
 > [`claude-usage-store.md`](claude-usage-store.md).
 
 Claude supports three usage data paths plus local cost usage. The main provider pipeline uses runtime-specific
@@ -306,10 +306,16 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
   - pi and OMP sessions attribute `anthropic` assistant usage to Claude and bucket it by assistant-turn timestamp, so a
     single pi-compatible session can contribute to multiple models/days.
   - Matching assistant entry IDs within the same session are counted once across roots; distinct turns are retained.
-- Cache:
-  - Native provider cache: `~/Library/Caches/CodexBar/cost-usage/claude-v6.json`
-  - Report memo: `~/Library/Caches/CodexBar/cost-usage/claude-v6.report-memo.json` stores source stamps and the daily report across launches. It is reused only while transcript inventory, cache/pricing artifacts, requested window, and report-semantics revision still match.
-  - The Claude/Vertex cache artifact retains source file identities independently of the shared Codex parser fingerprint. Replacing a transcript rebuilds its rows rather than merging an old prefix into a new suffix; genuine appends still use the saved parse offset. Older entries without identity are rebuilt once before reuse, including during the normal refresh debounce.
+- Scan state:
+  - `~/Library/Caches/CodexBar/cost-usage/cost-usage.sqlite` — per-event rows, per-file parse offsets
+    and identities, and per-ledger scan windows. There is no Claude JSON cache any more; see
+    [`claude-usage-store.md`](claude-usage-store.md).
+  - Report memo: `~/Library/Caches/CodexBar/cost-usage/<provider>-ledger.report-memo.json` stores
+    source stamps and the daily report across launches. It is reused only while transcript
+    inventory, store generation, pricing artifact, requested window, and report-semantics revision
+    still match.
+  - Replacing a transcript rebuilds its rows rather than merging an old prefix into a new suffix;
+    genuine appends still use the saved parse offset.
   - pi-compatible session cache: `~/Library/Caches/CodexBar/cost-usage/pi-sessions-v8.json`
 
 ## Key files

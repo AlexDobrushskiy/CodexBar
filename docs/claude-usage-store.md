@@ -1,17 +1,58 @@
 ---
-summary: "Per-row Claude usage attribution: Bedrock/Vertex backend classification and the SQLite usage store that replaces the day×model JSON artifacts."
+summary: "Per-row Claude usage attribution and the SQLite store that is now the whole Claude scan state: schema, reconciliation, pricing, retention and the invariants each rests on."
 read_when:
-  - Working on Claude or Bedrock local cost attribution
+  - Working on Claude, Vertex or Bedrock local cost attribution
   - Changing the Claude transcript parser or its stored row shape
   - Touching the CostUsageStore schema, its migrations, or Claude reconciliation
+  - Changing how local usage is priced, retained, or pruned
   - Querying Claude usage by project, session, branch, or backend
 ---
 
 # Claude usage store
 
-Two related changes, both on this fork: Claude usage is attributed **per transcript row** rather than
-per config directory, and those rows are persisted in SQLite instead of being collapsed into
-day×model totals. This is the `#2760` migration for the Claude side of `CostUsageStore`.
+Claude usage is attributed **per transcript row** rather than per config directory, and those rows
+live in SQLite. The store is not a cache beside a JSON artifact any more — it *is* the Claude scan
+state, the only copy of the usage, and the source every ledger's report is read from. This is the
+`#2760` migration for the Claude side of `CostUsageStore`.
+
+One unfiltered scan per set of roots fills it; Claude, Vertex and Bedrock reports are `WHERE`
+clauses over its `backend` column.
+
+## Querying it
+
+The database is `~/Library/Caches/CodexBar/cost-usage/cost-usage.sqlite`. Read it with `sqlite3`
+directly; the app holds a WAL connection, so a reader sees a consistent snapshot without waiting.
+
+Query `claude_reconciled_events` (cross-file winners) or `claude_event_costs` (the same rows with a
+`cost_usd`), not `claude_usage_events` — that table keeps *every* parent/subagent candidate on
+purpose, so summing it over-counts whenever a session has subagent copies of a request.
+
+Subscription versus Bedrock over any period:
+
+```sql
+SELECT backend, SUM(input + cache_read + cache_create + output) AS tokens, SUM(cost_usd) AS usd
+FROM claude_event_costs
+WHERE day BETWEEN '2026-08-01' AND '2026-08-31'
+GROUP BY backend;
+```
+
+`backend` is `firstParty` (Anthropic subscription or direct API), `bedrock` or `vertexAI` — the
+`ClaudeLogBackend.rawValue`, not the `first-party` spelling reports use. The same rows answer by
+project (`cwd`), session (`session_id`), branch (`git_branch`), model, or any combination:
+
+```sql
+SELECT cwd, model, SUM(cost_usd) AS usd
+FROM claude_event_costs
+WHERE backend = 'bedrock' AND day >= date('now', '-30 days', 'localtime')
+GROUP BY cwd, model ORDER BY usd DESC;
+```
+
+`day` is a local-calendar day key (see the time-zone invariant), so compare it against local dates.
+How far back this reaches is the ledger's retained window in `claude_ledger_state`, which widens to
+the widest window anything has asked for and never narrows on its own.
+
+Costs are list-price estimates for every backend; see
+[the pricing policy](#every-backend-is-priced-at-official-list-rates-on-purpose) for why.
 
 ## Why per-row attribution
 
@@ -51,7 +92,7 @@ request — so CloudWatch/Cost Explorer stay an *optional vendor-metered overlay
 entirely from local files. The probe is bounded (newest transcripts first, capped bytes per file,
 first-hit exit) and runs behind the provider availability TTL cache.
 
-## Schema (v4)
+## Schema (v7)
 
 ### `claude_source_files`
 
@@ -83,7 +124,18 @@ unrecoverable; a view can be corrected without a rescan.
 
 ### `claude_reconciled_events`
 
-See below.
+See [Reconciliation](#reconciliation).
+
+### `claude_ledger_state` (v7)
+
+One row per ledger — `(roots_fingerprint, scan_since_day, scan_until_day, last_scan_ms,
+generation)`. This is what the JSON artifact carried besides the rows: the window this ledger has
+covered, when it last ran, and a counter that advances on every commit for report memos to key on,
+in place of the artifact mtime they used to watch.
+
+Keyed by roots, not by provider: what a scan covers is decided by the directories it walks, and
+Claude, Vertex and Bedrock over the same roots are one scan. A profile-scoped `CLAUDE_CONFIG_DIR`
+gets its own row because it walks its own roots.
 
 ### `claude_model_prices` and `claude_event_costs` (v5)
 
@@ -110,6 +162,20 @@ ingest cost, then unpriced.
 
 A row with no timestamp cannot be placed in a validity window, so it does not join and falls back to
 its ingest cost. The parser requires a parseable timestamp, so that is a guard rather than a path.
+
+#### Every backend is priced at official list rates, on purpose
+
+The table is keyed by `(model, backend, …)` but seeded **identically for every backend**. That is a
+decision, not an omission.
+
+Bedrock and Vertex resell Claude under per-customer contracts CodexBar cannot see — committed-use
+discounts, private offers, regional rates. A "Bedrock price" in this catalog would be some other
+customer's price presented as yours, which is worse than an openly approximate number. So every row
+is priced at Anthropic's published per-token rates, and reports say so: their `costProvenance` is
+`listPriceEstimate`. The vendor's own invoice remains the authority for what was actually billed.
+
+The `backend` column stays because the schema should be able to express a per-account rate if one is
+ever supplied. Seeding it uniformly is the policy; the column is the mechanism.
 
 ## Reconciliation
 
@@ -145,7 +211,7 @@ APFS stores filenames decomposed. Measured on `/p/cafe<U+0301>/` versus `/p/cafz
 They invert. Ordering on the raw path would make the view and the scanner disagree about which
 equal-rank sidechain wins for any non-ASCII project path.
 
-## Migration v3 → v4 → v5
+## Migrations v3 → v7
 
 Explicit and transactional, **not** via `adoptCompatiblePredecessor`. That hook proves same-base
 parser compatibility only: `canAdoptPredecessor` recomputes the predecessor stamp from the *current*
@@ -158,11 +224,25 @@ Order: validate v3 → `CREATE` the new objects (exact, not `IF NOT EXISTS`) →
 the live Codex ledger, whose discovery, accumulator, buffer and previous-report state a full rebuild
 would discard.
 
-v4 → v5 adds `claude_model_prices` in its corrected shape and the `claude_event_costs` view. The v4
-table shipped with no writer and the wrong column types, so it is dropped and recreated rather than
-altered; nothing can be carried across. Leaving it in place makes the migration's exact `CREATE
-TABLE` collide, roll back and rebuild, which silently drops both ledgers — the same trap as leaving a
-view behind on the v3 path. There is a regression test for exactly that.
+Each step, and what it is for:
+
+| step | change |
+|---|---|
+| v3 → v4 | the Claude tables, indexes and `claude_reconciled_events` |
+| v4 → v5 | `claude_model_prices` in its corrected shape, plus the `claude_event_costs` view |
+| v5 → v6 | `source_present` on `claude_source_files`, so a departure can be recorded |
+| v6 → v7 | `claude_ledger_state`, which lets the store be the scan state |
+
+v4's price table shipped with no writer and the wrong column types, so v5 drops and recreates it
+rather than altering it; nothing can be carried across. Leaving it in place makes the migration's
+exact `CREATE TABLE` collide, roll back and rebuild, which silently drops both ledgers — the same
+trap as leaving a view behind on the v3 path. There is a regression test for exactly that.
+
+**A fixture for an older version must undo every object that version did not have.** Today's code
+creates them all, so a test that drops only some of them reproduces a shape no release ever shipped,
+and the collide-rollback-rebuild above looks like a migration bug rather than a fixture bug. This bit
+three times, once per added object, which is why `makeGenuinely(base:)` now expresses the whole
+downgrade in one place.
 
 Note that a clean `PRAGMA foreign_key_check` returns **no rows**, so it must be stepped directly —
 `scalarText` treats `SQLITE_DONE` as a failure.
@@ -181,6 +261,19 @@ their removal was always gated on. They had become three copies of the same data
 files holding every backend's rows plus the 64 MB database — because making the scan unfiltered
 meant each provider's artifact accumulated the whole vault.
 
+### Append and replace
+
+A file write is one of two modes, in one transaction with its file row.
+
+- **Replace** — a first parse, a full reparse, or an identity change. Every event for that file is
+  deleted before the new ones are inserted, so rows no longer in the transcript cannot survive.
+- **Append** — the file grew and is being read from its recorded offset. Keyed rows upsert onto
+  their new ordinal, which is the last-chunk-wins rule; unkeyed rows take fresh ordinals continuing
+  from `MAX(row_index)`, rather than colliding with lines already stored.
+
+Appending widens the file's recorded coverage instead of replacing it, because the earlier days are
+still stored and narrowing coverage is what makes a wider window look falsely complete.
+
 ### One window per ledger, not per caller
 
 A scan parses over the window the *ledger* retains, not the one its caller asked for, and prunes to
@@ -192,7 +285,7 @@ history. The retained window therefore only ever widens, through `MIN`/`MAX` on 
 
 ## Only unfiltered scans may write
 
-The mirror from a scan into the store runs **only when `claudeLogProviderFilter == .all`**.
+A scan persists **only when `claudeLogProviderFilter == .all`**.
 
 A provider-scoped scan parses just the rows its filter admits. Because a file write replaces that
 file's events, storing a filtered scan would persist a partial row set, and a later scan for a
@@ -226,13 +319,17 @@ the file is untracked, so two first writes cannot both win. The file row and its
 transaction, which is what makes a replace atomic: a rejected write must not leave a file whose
 events were already deleted.
 
-**Retention and coverage.** Nothing else bounds these tables — a real vault is ~56k events per
-30-day window, and a transcript never touched again keeps its rows forever. Every scan prunes its
-own roots to its own scan window, and `retainDayWindow` carries Claude across too. Pruning events
-while keeping EOF offsets is what would make a later, wider window look falsely complete, so
-coverage is clamped to what survived and `claudeSourceFilesNeedingReparse` names the files that can
-no longer answer for an earlier day. A file left with nothing in the window is dropped outright:
-keeping its offsets *is* the falsely-complete state.
+**Retention and coverage.** Nothing else bounds these tables — a real vault is ~150k events across a
+year, and a transcript never touched again keeps its rows forever. Every scan prunes its own roots to
+the window its ledger retains, and `retainDayWindow` carries Claude across too. Pruning events while
+keeping EOF offsets is what would make a later, wider window look falsely complete, so coverage is
+clamped to what survived and `claudeSourceFilesNeedingReparse` names the files that can no longer
+answer for an earlier day.
+
+A source row is deleted only when it has **no events and is no longer on disk**. An archived
+transcript with nothing left in the window describes nothing, and keeping its offsets *is* the
+falsely-complete state. One still on disk keeps its row even with no events: a transcript that
+reported no usage is still tracked, and dropping it would make every later scan reparse it in full.
 
 **Archive, not mirror.** A transcript that leaves the disk is recorded as gone
 (`source_present = 0`) and keeps the usage it already reported; the store is a usage record, and
@@ -248,15 +345,17 @@ a calendar change rewrites every file's events rather than leaving them bucketed
 **Re-stat at commit.** A transcript written to while it is being read is parsed only as far as it
 went. The pre-parse stamp is what gets recorded — that is what makes the next scan notice — and the
 file is stamped incomplete rather than complete. Its rows are still real; the file simply is not
-fully covered yet.
+fully covered yet. Reaching that window needs a seam, so `Options.claudeDidParseFileForTesting` runs
+between the parse and the re-stat; a real race is not reproducible.
 
 ## Status
 
-Landed: the schema and migrations, event storage, the reconciliation view, the parser detail fields,
-the scan→store mirror, the unified read path — Claude, Vertex and Bedrock reports are now built from
-the store — the price catalog with its cost view, which every report now reads its costs from, and
-the concurrency, retention, coverage, time-zone and re-stat invariants above, and the retirement of
-the JSON artifacts, which leaves the store as the only Claude scan state.
+Complete. The store holds every Claude-family event, is the only Claude scan state, prices from its
+own catalog, prunes itself, and answers each ledger's report. The `claude-v6.json` /
+`bedrock-v6.json` artifacts are gone.
+
+Deliberately not done: per-backend pricing. See
+[Every backend is priced at official list rates](#every-backend-is-priced-at-official-list-rates-on-purpose).
 
 ### Verified against the real vault
 

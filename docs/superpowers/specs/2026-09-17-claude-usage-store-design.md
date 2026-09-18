@@ -166,6 +166,25 @@ transcripts — and the full supported suite via
 `HOME` writes through to the ambient `~/Library/Caches/CodexBar` artifacts — this already happened
 once and truncated the real `bedrock-v6.json`.
 
+## What implementation changed
+
+This spec is the design as approved. Where the built thing differs, the living doc
+(`docs/claude-usage-store.md`) is authoritative; the deltas worth knowing:
+
+| spec said | built instead | why |
+|---|---|---|
+| `model_prices` with `*_per_mtok` columns | per-token columns, no stored 1h rate, keyed on normalized `model` | per-Mtok division and a flat 1h rate each disagree with the Swift formula by an ulp; reports have always repriced on the normalized identity |
+| seed "manual Bedrock rows" | every backend seeded at Anthropic list rates | Bedrock and Vertex resell under per-customer contracts CodexBar cannot see, so a stored "Bedrock price" would be someone else's |
+| the JSON artifacts retire after the SQL path lands | they are gone, and the store is the scan state | `claude_ledger_state` (v7) carries the window and generation the artifact held; keeping it meant three copies of the same rows |
+| the sweep deletes rows for vanished transcripts | a departure is recorded (`source_present`), rows stay | the store is the only copy now, so a rotated transcript must not take its usage with it |
+| a scan covers the window its caller asked for | a scan covers the window its *ledger* retains | replacement is all-or-nothing per file, so a narrow reparse would drop a wide reader's history and nothing would restore it |
+| base v4 | base v7 | one bump per added object: prices (v5), `source_present` (v6), ledger state (v7) |
+
+Two invariants the spec named turned out to have teeth in ways the text did not anticipate, both
+caught by tests rather than by review: the retention/coverage pair, which a 30-day refresh used to
+violate against a 365-day dashboard, and the "genuine older version" fixture rule, which bit once
+per added schema object.
+
 ## Risk
 
 Vendored-file churn against upstream, accepted: `#2760` states this direction and it is Alex's fork.
